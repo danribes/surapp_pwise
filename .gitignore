@@ -46,3 +46,13 @@ htmlcov/
 
 # Logs
 *.log
+
+# Extraction results
+results/
+test_output/
+
+# Test files
+*.pdf
+*.jpg
+*.jpeg
+*.png

@@ -4,18 +4,31 @@ import cv2
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from datetime import datetime
 
 
-def extract_curves_from_image(image_path: str, output_dir: str = "test_output"):
+def extract_curves_from_image(image_path: str, output_dir: str = None):
     """
     Extract Research (blue) and Control (red) curves from KM plot image.
 
     Args:
         image_path: Path to the KM curve image
-        output_dir: Directory to save results
+        output_dir: Directory to save results (if None, creates results/<image_name>_<timestamp>/)
     """
-    # Create output directory
-    Path(output_dir).mkdir(exist_ok=True)
+    # Create output directory structure
+    image_name = Path(image_path).stem
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if output_dir is None:
+        # Create results folder with subfolder for this extraction
+        results_base = Path("results")
+        results_base.mkdir(exist_ok=True)
+        output_dir = results_base / f"{image_name}_{timestamp}"
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Output directory: {output_dir}")
 
     # Load image
     img = cv2.imread(image_path)
