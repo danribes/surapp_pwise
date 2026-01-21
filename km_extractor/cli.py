@@ -5,8 +5,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__
-from .extractor import extract_curves_from_image
+# Handle both installed package and PyInstaller bundled modes
+try:
+    from km_extractor import __version__
+    from km_extractor.extractor import extract_curves_from_image
+except ImportError:
+    from . import __version__
+    from .extractor import extract_curves_from_image
 
 
 def print_banner():

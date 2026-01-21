@@ -271,6 +271,20 @@ def extract_curves_from_image(
 
         return dedupe(research_new), dedupe(control_new)
 
+    def remove_exact_duplicates(points):
+        """Remove points where both X and Y coordinates are identical."""
+        if not points:
+            return points
+
+        seen = set()
+        result = []
+        for t, s in points:
+            key = (round(t, 4), round(s, 4))
+            if key not in seen:
+                seen.add(key)
+                result.append((t, s))
+        return result
+
     def enforce_monotonicity(points):
         if not points:
             return points
@@ -323,6 +337,23 @@ def extract_curves_from_image(
         log(f"\nAfter cleaning (step points only):")
         log(f"  Research: {len(research_clean)} points")
         log(f"  Control: {len(control_clean)} points")
+
+    # Final deduplication: remove any exact (X, Y) duplicates
+    research_before = len(research_clean)
+    control_before = len(control_clean)
+    research_clean = remove_exact_duplicates(research_clean)
+    control_clean = remove_exact_duplicates(control_clean)
+
+    research_removed = research_before - len(research_clean)
+    control_removed = control_before - len(control_clean)
+
+    if research_removed > 0 or control_removed > 0:
+        log(f"\nRemoved exact duplicates (same X and Y):")
+        if research_removed > 0:
+            log(f"  Research: {research_removed} duplicates removed")
+        if control_removed > 0:
+            log(f"  Control: {control_removed} duplicates removed")
+        log(f"  Final counts: Research={len(research_clean)}, Control={len(control_clean)}")
 
     # Save results
     research_df = pd.DataFrame(research_clean, columns=['Time', 'Survival'])
