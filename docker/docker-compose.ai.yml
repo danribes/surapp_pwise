@@ -1,0 +1,57 @@
+# SURAPP AI-Enhanced Docker Compose Override
+#
+# Usage:
+#   cd docker
+#   docker-compose -f docker-compose.yml -f docker-compose.ai.yml up -d
+#
+# This adds Ollama with llama3.2-vision for AI-powered validation
+
+services:
+  # Ollama AI service with vision model
+  ollama:
+    image: ollama/ollama:latest
+    container_name: surapp-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    # Uncomment for NVIDIA GPU support:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # AI-enhanced SURAPP service
+  surapp-ai:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.ai
+    image: surapp-ai:latest
+    container_name: surapp-ai
+    volumes:
+      - ../input:/data/input:ro
+      - ../output:/data/output
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - AI_MODEL=llama3.2-vision
+      - AI_ENABLED=true
+    depends_on:
+      ollama:
+        condition: service_healthy
+    working_dir: /data/input
+    entrypoint: ["python", "/app/extract_km_ai.py"]
+    command: ["--help"]
+
+volumes:
+  ollama_data:
+    name: surapp_ollama_data

@@ -12,19 +12,72 @@ This tool detects curves in KM plot images (both solid and dashed line styles) a
 - CSV export with time and survival values
 - Debug visualization for verification
 - Cross-platform support (Windows, Mac, Linux)
+- **AI-powered validation** using llama3.2-vision (optional)
 
-## Installation Options
+## Quick Start
 
-SURAPP can be installed in two ways:
+SURAPP provides a **unified entry point** that lets you choose how to run:
 
-| Method | Best For | Setup Time |
-|--------|----------|------------|
-| **Docker** | Guaranteed compatibility, no Python setup | ~5 min first run |
-| **Native Python** | Faster startup, development, customization | ~2 min |
+**Linux/Mac:**
+```bash
+# Make executable (first time only)
+chmod +x src/surapp.sh
+
+# Run - will prompt for execution mode
+./src/surapp.sh my_km_plot.png
+```
+
+**Windows:**
+```batch
+src\surapp.bat my_km_plot.png
+```
+
+You'll see a menu to select the execution mode:
+
+```
+╔═══════════════════════════════════════════════════════════╗
+║           SURAPP - Kaplan-Meier Curve Extractor           ║
+╚═══════════════════════════════════════════════════════════╝
+
+Select execution mode:
+
+  [1] Python (Native)     - Fastest startup           [Ready]
+  [2] Docker (Standard)   - No Python setup needed    [Ready]
+  [3] Docker (AI)         - With AI validation        [Ready]
+
+  [0] Cancel
+
+Select mode [1-3]:
+```
+
+Or specify the mode directly:
+
+```bash
+./src/surapp.sh --mode python my_plot.png      # Native Python
+./src/surapp.sh --mode docker my_plot.png      # Docker container
+./src/surapp.sh --mode ai my_plot.png          # AI-enhanced (Docker)
+```
+
+Check system status:
+```bash
+./src/surapp.sh --status
+```
 
 ---
 
-## Option 1: Docker Installation (Recommended for most users)
+## Execution Modes
+
+| Mode | Command | Requirements | Best For |
+|------|---------|--------------|----------|
+| **Python** | `--mode python` | Python + packages | Fast iteration, development |
+| **Docker** | `--mode docker` | Docker only | Guaranteed compatibility |
+| **AI** | `--mode ai` | Docker + ~4GB model | Validation, quality assurance |
+
+---
+
+## Installation Options
+
+### Option 1: Docker Installation (Recommended for most users)
 
 Docker ensures SURAPP works identically on any system, with all dependencies pre-configured.
 
@@ -39,19 +92,19 @@ Install Docker:
 **Linux/Mac:**
 ```bash
 # Make script executable (first time only)
-chmod +x docker-run.sh
+chmod +x docker/run.sh
 
 # Run extraction
-./docker-run.sh your_km_plot.png
+./docker/run.sh your_km_plot.png
 
 # With options
-./docker-run.sh your_km_plot.png --time-max 36 --curves 2
+./docker/run.sh your_km_plot.png --time-max 36 --curves 2
 ```
 
 **Windows:**
 ```batch
-docker-run.bat your_km_plot.png
-docker-run.bat your_km_plot.png --time-max 36 --curves 2
+docker\run.bat your_km_plot.png
+docker\run.bat your_km_plot.png --time-max 36 --curves 2
 ```
 
 Results are saved to a `results/` folder next to your input image.
@@ -116,7 +169,7 @@ pip3 install opencv-python numpy pandas matplotlib pillow
 **Interactive mode** (recommended) - select image from list:
 
 ```bash
-python extract_km.py
+python src/extract_km.py
 ```
 
 Output:
@@ -134,7 +187,7 @@ Select image number: 1
 **Direct mode** - specify image path:
 
 ```bash
-python extract_km.py your_km_plot.png --time-max 40 --curves 2
+python src/extract_km.py your_km_plot.png --time-max 40 --curves 2
 ```
 
 Results are saved to `results/<image_name>_<timestamp>/`.
@@ -149,8 +202,8 @@ All scripts support interactive image selection (just run without arguments).
 ### Step 1: Preview Image
 
 ```bash
-python step1_preview_image.py              # Interactive
-python step1_preview_image.py image.png    # Direct
+python src/step1_preview_image.py              # Interactive
+python src/step1_preview_image.py image.png    # Direct
 ```
 
 Shows image dimensions, color type, and basic properties.
@@ -158,8 +211,8 @@ Shows image dimensions, color type, and basic properties.
 ### Step 2: Calibrate Axes
 
 ```bash
-python step2_calibrate_axes.py                        # Interactive
-python step2_calibrate_axes.py image.png --time-max 50
+python src/step2_calibrate_axes.py                        # Interactive
+python src/step2_calibrate_axes.py image.png --time-max 50
 ```
 
 Detects plot area boundaries and axis ranges.
@@ -167,8 +220,8 @@ Detects plot area boundaries and axis ranges.
 ### Step 3: Extract Curves
 
 ```bash
-python step3_extract_curves.py                                  # Interactive
-python step3_extract_curves.py image.png --time-max 40 --curves 2
+python src/step3_extract_curves.py                                  # Interactive
+python src/step3_extract_curves.py image.png --time-max 40 --curves 2
 ```
 
 Detects curves and exports coordinates to CSV files.
@@ -210,19 +263,19 @@ Time,Survival
 
 ```bash
 # Interactive mode - select image from list
-python extract_km.py
+python src/extract_km.py
 
 # Direct mode - specify image
-python extract_km.py km_plot.png
+python src/extract_km.py km_plot.png
 
 # With known time range (0-60 months)
-python extract_km.py km_plot.png --time-max 60
+python src/extract_km.py km_plot.png --time-max 60
 
 # Single curve only
-python extract_km.py km_plot.png --curves 1
+python src/extract_km.py km_plot.png --curves 1
 
 # Custom output directory
-python extract_km.py km_plot.png -o my_results/
+python src/extract_km.py km_plot.png -o my_results/
 ```
 
 ---
@@ -231,30 +284,46 @@ python extract_km.py km_plot.png -o my_results/
 
 ```
 surapp_pwise/
-├── extract_km.py           # Main extraction script (all-in-one)
-├── step1_preview_image.py  # Step 1: Preview image
-├── step2_calibrate_axes.py # Step 2: Calibrate axes
-├── step3_extract_curves.py # Step 3: Extract curves
 ├── README.md               # This file
 ├── requirements.txt        # Python dependencies
+├── requirements.ai.txt     # AI-specific dependencies
+├── .dockerignore           # Docker build exclusions
+│
+├── src/                    # Source scripts
+│   ├── surapp.sh           # Unified entry point (Linux/Mac)
+│   ├── surapp.bat          # Unified entry point (Windows)
+│   ├── extract_km.py       # Main extraction script (all-in-one)
+│   ├── extract_km_ai.py    # AI-enhanced extraction script
+│   ├── step1_preview_image.py  # Step 1: Preview image
+│   ├── step2_calibrate_axes.py # Step 2: Calibrate axes
+│   └── step3_extract_curves.py # Step 3: Extract curves
 │
 ├── lib/                    # Core detection modules
 │   ├── __init__.py
 │   ├── detector.py         # Curve detection (solid/dashed)
 │   ├── calibrator.py       # Axis calibration
-│   └── color_detector.py   # Color-based curve separation
+│   ├── color_detector.py   # Color-based curve separation
+│   ├── ai_validator.py     # AI validation logic
+│   └── ai_config.py        # AI configuration
+│
+├── input/                  # Input images folder
 │
 ├── docs/                   # Documentation
 │   ├── surapp_code.md      # Technical code documentation
 │   ├── surapp_learn.md     # Educational guide
 │   ├── surapp_plan.md      # Development plan
-│   └── surapp_docker.md    # Docker implementation guide
+│   ├── surapp_docker.md    # Docker implementation guide
+│   └── surapp_ai.md        # AI-enhanced extraction guide
 │
-├── Dockerfile              # Docker image definition
-├── docker-compose.yml      # Docker Compose configuration
-├── docker-run.sh           # Docker helper script (Linux/Mac)
-├── docker-run.bat          # Docker helper script (Windows)
-├── .dockerignore           # Docker build exclusions
+├── docker/                 # Docker configuration
+│   ├── Dockerfile          # Standard Docker image
+│   ├── Dockerfile.ai       # AI-enhanced Docker image
+│   ├── docker-compose.yml  # Docker Compose configuration
+│   ├── docker-compose.ai.yml # AI services configuration
+│   ├── run.sh              # Docker helper (Linux/Mac)
+│   ├── run.bat             # Docker helper (Windows)
+│   ├── run-ai.sh           # AI Docker helper (Linux/Mac)
+│   └── run-ai.bat          # AI Docker helper (Windows)
 │
 └── results/                # Output directory (auto-created)
 ```
@@ -288,6 +357,32 @@ surapp_pwise/
 
 ---
 
+## AI-Enhanced Extraction (Optional)
+
+SURAPP can use AI (llama3.2-vision via Ollama) to validate extraction results:
+
+```bash
+# Start AI services (first time downloads ~4GB model)
+./docker/run-ai.sh --start
+
+# Run extraction with AI validation
+./docker/run-ai.sh my_km_plot.png --validate
+
+# Check AI service status
+./docker/run-ai.sh --status
+```
+
+The AI compares the original image with extracted curves and:
+- Validates extraction accuracy
+- Identifies potential issues
+- Provides confidence scores
+
+**Requirements:** Docker + ~4GB disk space for the model
+
+For detailed AI setup, see [docs/surapp_ai.md](docs/surapp_ai.md).
+
+---
+
 ## Requirements
 
 ### For Native Python Installation
@@ -309,6 +404,7 @@ surapp_pwise/
 - [Educational Guide](docs/surapp_learn.md) - Learn image processing concepts
 - [Development Plan](docs/surapp_plan.md) - How the tool was built
 - [Docker Guide](docs/surapp_docker.md) - Docker implementation details
+- [AI Guide](docs/surapp_ai.md) - AI-enhanced extraction with llama3.2-vision
 
 ---
 

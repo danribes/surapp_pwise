@@ -8,6 +8,14 @@ from .color_detector import (
     extract_curves_with_overlap_handling
 )
 
+# AI modules (optional - require ollama package)
+try:
+    from .ai_validator import AIValidator, check_ollama_status
+    from .ai_config import AIConfig, ValidationResult, ExtractionParameters
+    _AI_AVAILABLE = True
+except ImportError:
+    _AI_AVAILABLE = False
+
 __all__ = [
     # Grayscale/line-style detection
     'LineStyleDetector',
@@ -22,3 +30,13 @@ __all__ = [
     'AxisCalibrator',
     'AxisCalibrationResult',
 ]
+
+# Add AI exports if available
+if _AI_AVAILABLE:
+    __all__.extend([
+        'AIValidator',
+        'AIConfig',
+        'ValidationResult',
+        'ExtractionParameters',
+        'check_ollama_status',
+    ])

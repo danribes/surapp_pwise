@@ -1,0 +1,11 @@
+# AI-specific dependencies for SURAPP
+# Install with: pip install -r requirements.ai.txt
+
+# Ollama Python client
+ollama>=0.3.0
+
+# HTTP client for API calls
+httpx>=0.25.0
+
+# Image encoding utilities
+python-multipart>=0.0.6

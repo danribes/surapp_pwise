@@ -10,9 +10,11 @@ Docker containerization ensures SURAPP runs identically on any system with Docke
 - Conflicting package versions
 - Operating system differences
 
+All Docker files are located in the `docker/` folder to keep the project root clean.
+
 ## Docker Files
 
-### Dockerfile
+### docker/Dockerfile
 
 The `Dockerfile` defines the container image:
 
@@ -56,10 +58,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY lib/ ./lib/
-COPY extract_km.py .
-COPY step1_preview_image.py .
-COPY step2_calibrate_axes.py .
-COPY step3_extract_curves.py .
+COPY src/extract_km.py .
+COPY src/step1_preview_image.py .
+COPY src/step2_calibrate_axes.py .
+COPY src/step3_extract_curves.py .
 ```
 
 Files are copied in order of change frequency:
@@ -77,7 +79,7 @@ WORKDIR /data
 
 Standard mount points for input images and output results.
 
-### docker-compose.yml
+### docker/docker-compose.yml
 
 Docker Compose simplifies running the container:
 
@@ -86,11 +88,13 @@ version: '3.8'
 
 services:
   surapp:
-    build: .
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     image: surapp:latest
     volumes:
-      - ./input:/data/input:ro    # Read-only input
-      - ./output:/data/output     # Writable output
+      - ../input:/data/input:ro   # Read-only input
+      - ../output:/data/output    # Writable output
     working_dir: /data/input
     entrypoint: ["python", "/app/extract_km.py"]
 ```
@@ -124,14 +128,14 @@ venv/
 
 ### Helper Scripts
 
-**docker-run.sh (Linux/Mac):**
+**docker/run.sh (Linux/Mac):**
 ```bash
-./docker-run.sh my_plot.png --time-max 24
+./docker/run.sh my_plot.png --time-max 24
 ```
 
-**docker-run.bat (Windows):**
+**docker/run.bat (Windows):**
 ```batch
-docker-run.bat my_plot.png --time-max 24
+docker\run.bat my_plot.png --time-max 24
 ```
 
 Both scripts:
@@ -144,46 +148,70 @@ Both scripts:
 
 ## Usage
 
-### Method 1: Helper Scripts (Recommended)
+### Method 1: Unified Entry Point (Recommended)
+
+The easiest way is to use the unified `surapp.sh` script:
 
 **Linux/Mac:**
 ```bash
-# Make script executable (first time only)
-chmod +x docker-run.sh
+# Make executable (first time only)
+chmod +x src/surapp.sh
 
-# Run extraction
-./docker-run.sh path/to/your/km_plot.png
+# Run with Docker mode
+./src/surapp.sh --mode docker path/to/your/km_plot.png
 
-# With options
-./docker-run.sh km_plot.png --time-max 36 --curves 2
+# Or interactive mode selection
+./src/surapp.sh km_plot.png
 ```
 
 **Windows:**
 ```batch
-docker-run.bat path\to\your\km_plot.png
-docker-run.bat km_plot.png --time-max 36 --curves 2
+src\surapp.bat --mode docker path\to\your\km_plot.png
+```
+
+### Method 2: Docker Helper Scripts
+
+**Linux/Mac:**
+```bash
+# Make script executable (first time only)
+chmod +x docker/run.sh
+
+# Run extraction
+./docker/run.sh path/to/your/km_plot.png
+
+# With options
+./docker/run.sh km_plot.png --time-max 36 --curves 2
+```
+
+**Windows:**
+```batch
+docker\run.bat path\to\your\km_plot.png
+docker\run.bat km_plot.png --time-max 36 --curves 2
 ```
 
 Results are saved to a `results/` folder next to the input image.
 
-### Method 2: Docker Compose
+### Method 3: Docker Compose
 
 ```bash
-# Place images in ./input folder
-mkdir -p input output
-cp your_plot.png input/
+# From the docker/ folder
+cd docker
+
+# Place images in ../input folder
+mkdir -p ../input ../output
+cp your_plot.png ../input/
 
 # Run extraction
 docker-compose run surapp your_plot.png --time-max 24
 
-# Results appear in ./output folder
+# Results appear in ../output folder
 ```
 
-### Method 3: Direct Docker Commands
+### Method 4: Direct Docker Commands
 
 ```bash
-# Build image
-docker build -t surapp:latest .
+# Build image (from project root)
+docker build -t surapp:latest -f docker/Dockerfile .
 
 # Run extraction
 docker run --rm \

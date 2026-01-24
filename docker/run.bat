@@ -4,14 +4,17 @@ REM
 REM This script simplifies running SURAPP in Docker.
 REM
 REM Usage:
-REM   docker-run.bat <image_file> [options]
+REM   run.bat <image_file> [options]
 REM
 REM Examples:
-REM   docker-run.bat my_plot.png
-REM   docker-run.bat my_plot.png --time-max 24
-REM   docker-run.bat my_plot.png --curves 3 --time-max 36
+REM   run.bat my_plot.png
+REM   run.bat my_plot.png --time-max 24
+REM   run.bat my_plot.png --curves 3 --time-max 36
 
 setlocal enabledelayedexpansion
+
+set "SCRIPT_DIR=%~dp0"
+set "PROJECT_ROOT=%SCRIPT_DIR%.."
 
 REM Check if Docker is installed
 where docker >nul 2>nul
@@ -71,7 +74,7 @@ REM Build Docker image if not exists
 docker image inspect surapp:latest >nul 2>nul
 if %ERRORLEVEL% neq 0 (
     echo Building Docker image ^(first run only^)...
-    docker build -t surapp:latest "%~dp0"
+    docker build -t surapp:latest -f "%SCRIPT_DIR%Dockerfile" "%PROJECT_ROOT%"
     echo.
 )
 
@@ -88,13 +91,9 @@ REM Run the extraction
 echo Running extraction...
 echo.
 
-REM Convert Windows paths to Docker-compatible paths
-set "DOCKER_INPUT=%IMAGE_DIR%"
-set "DOCKER_OUTPUT=%OUTPUT_DIR%"
-
 docker run --rm ^
-    -v "%DOCKER_INPUT%:/data/input:ro" ^
-    -v "%DOCKER_OUTPUT%:/data/output" ^
+    -v "%IMAGE_DIR%:/data/input:ro" ^
+    -v "%OUTPUT_DIR%:/data/output" ^
     surapp:latest ^
     python /app/extract_km.py "/data/input/%IMAGE_NAME%" -o "/data/output" %EXTRA_ARGS%
 

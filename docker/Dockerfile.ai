@@ -1,0 +1,58 @@
+# SURAPP AI-Enhanced - Kaplan-Meier Curve Extractor with AI Validation
+# Docker image with Ollama client for vision-based validation
+
+# Use Python 3.11 slim image as base
+FROM python:3.11-slim
+
+# Set metadata
+LABEL maintainer="SURAPP Team"
+LABEL description="AI-enhanced Kaplan-Meier survival curve data extractor"
+LABEL version="2.0"
+
+# Prevent Python from writing .pyc files and buffering stdout/stderr
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Default AI configuration
+ENV OLLAMA_HOST=http://ollama:11434
+ENV AI_MODEL=llama3.2-vision
+ENV AI_ENABLED=true
+ENV AI_MAX_RETRIES=3
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies required by OpenCV
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first (for better layer caching)
+COPY requirements.txt .
+COPY requirements.ai.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt -r requirements.ai.txt
+
+# Copy application code
+COPY lib/ ./lib/
+COPY src/extract_km.py .
+COPY src/extract_km_ai.py .
+COPY src/step1_preview_image.py .
+COPY src/step2_calibrate_axes.py .
+COPY src/step3_extract_curves.py .
+
+# Create directories for input/output
+RUN mkdir -p /data/input /data/output
+
+# Set the data directory as the working directory for processing
+WORKDIR /data
+
+# Default command - show help
+CMD ["python", "/app/extract_km_ai.py", "--help"]

@@ -34,10 +34,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY lib/ ./lib/
-COPY extract_km.py .
-COPY step1_preview_image.py .
-COPY step2_calibrate_axes.py .
-COPY step3_extract_curves.py .
+COPY src/extract_km.py .
+COPY src/step1_preview_image.py .
+COPY src/step2_calibrate_axes.py .
+COPY src/step3_extract_curves.py .
 
 # Create directories for input/output
 RUN mkdir -p /data/input /data/output

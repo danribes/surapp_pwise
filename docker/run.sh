@@ -4,12 +4,12 @@
 # This script simplifies running SURAPP in Docker.
 #
 # Usage:
-#   ./docker-run.sh <image_file> [options]
+#   ./run.sh <image_file> [options]
 #
 # Examples:
-#   ./docker-run.sh my_plot.png
-#   ./docker-run.sh my_plot.png --time-max 24
-#   ./docker-run.sh my_plot.png --curves 3 --time-max 36
+#   ./run.sh my_plot.png
+#   ./run.sh my_plot.png --time-max 24
+#   ./run.sh my_plot.png --curves 3 --time-max 36
 
 set -e
 
@@ -18,6 +18,9 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Check if Docker is installed
 if ! command -v docker &> /dev/null; then
@@ -70,8 +73,7 @@ echo ""
 # Build Docker image if not exists
 if ! docker image inspect surapp:latest &> /dev/null; then
     echo -e "${YELLOW}Building Docker image (first run only)...${NC}"
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    docker build -t surapp:latest "$SCRIPT_DIR"
+    docker build -t surapp:latest -f "$SCRIPT_DIR/Dockerfile" "$PROJECT_ROOT"
     echo ""
 fi
 
