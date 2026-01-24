@@ -1,0 +1,38 @@
+# SURAPP Docker Compose Configuration
+#
+# Usage:
+#   1. Place your KM plot images in the ./input folder
+#   2. Run: docker-compose run surapp <image_name.png>
+#   3. Find results in the ./output folder
+#
+# Examples:
+#   docker-compose run surapp my_plot.png
+#   docker-compose run surapp my_plot.png --time-max 24 --curves 2
+
+version: '3.8'
+
+services:
+  surapp:
+    build: .
+    image: surapp:latest
+    volumes:
+      # Mount input folder (place your images here)
+      - ./input:/data/input:ro
+      # Mount output folder (results will appear here)
+      - ./output:/data/output
+    working_dir: /data/input
+    entrypoint: ["python", "/app/extract_km.py"]
+    # Override output directory to use mounted volume
+    command: ["--help"]
+
+  # Alternative service for step-by-step processing
+  surapp-steps:
+    build: .
+    image: surapp:latest
+    volumes:
+      - ./input:/data/input:ro
+      - ./output:/data/output
+    working_dir: /data/input
+    entrypoint: ["/bin/bash"]
+    stdin_open: true
+    tty: true

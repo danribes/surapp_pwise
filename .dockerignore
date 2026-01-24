@@ -1,0 +1,44 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+docs/
+*.md
+
+# Test images and results
+*.png
+*.jpg
+*.jpeg
+results/
+input/
+output/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
