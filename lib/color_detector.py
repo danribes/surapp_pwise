@@ -144,14 +144,17 @@ def detect_curve_colors(img: np.ndarray, min_pixels: int = 100, max_colors: int 
         hue_range = 12
 
         # Create HSV bounds
+        # Use lower saturation threshold (15) to capture faded colors in tails
+        sat_min = 15
+        val_min = 40
         if hue < hue_range:
-            hsv_lower = np.array([0, 40, 40], dtype=np.uint8)
+            hsv_lower = np.array([0, sat_min, val_min], dtype=np.uint8)
             hsv_upper = np.array([int(hue + hue_range), 255, 255], dtype=np.uint8)
         elif hue > 180 - hue_range:
-            hsv_lower = np.array([int(hue - hue_range), 40, 40], dtype=np.uint8)
+            hsv_lower = np.array([int(hue - hue_range), sat_min, val_min], dtype=np.uint8)
             hsv_upper = np.array([180, 255, 255], dtype=np.uint8)
         else:
-            hsv_lower = np.array([int(max(0, hue - hue_range)), 40, 40], dtype=np.uint8)
+            hsv_lower = np.array([int(max(0, hue - hue_range)), sat_min, val_min], dtype=np.uint8)
             hsv_upper = np.array([int(min(180, hue + hue_range)), 255, 255], dtype=np.uint8)
 
         # Get average RGB
@@ -296,24 +299,29 @@ def extract_curves_with_overlap_handling(
                 img_y = py_ext + y
                 all_curve_points[curve_idx].append((img_x, img_y))
 
-            # For curves not detected at this x, check if they might be overlapping
+            # For curves not detected at this x, check if they might be truly overlapping
+            # ONLY add points when curves are actually touching (within 3 pixels)
+            # Do NOT extrapolate or invent points - only use detected pixels
             detected_indices = {idx for idx, _ in curve_ys}
             for curve_idx in range(len(colors)):
                 if curve_idx not in detected_indices:
-                    # Check if this curve was recently detected at a similar y
-                    # (suggesting it might be overlapping with another curve)
+                    # Check if this curve was recently detected and might be overlapping
                     if all_curve_points[curve_idx]:
                         last_x, last_y = all_curve_points[curve_idx][-1]
-                        # If the gap is small and y position is similar to detected curve
-                        if (px_ext + x - last_x) < 20:  # Small x gap
+                        gap = px_ext + x - last_x
+
+                        # Only consider overlap if gap is very small (consecutive pixels)
+                        if gap <= 3:
+                            # Only assume TRUE overlap if curves are within 3 pixels vertically
                             for _, detected_y in curve_ys:
-                                # If within 5 pixels vertically, likely overlapping
-                                if abs(py_ext + detected_y - last_y) < 10:
-                                    # Add point at the detected y (curves overlap)
+                                actual_detected_y = py_ext + detected_y
+                                if abs(actual_detected_y - last_y) <= 3:
+                                    # Curves are truly overlapping - use detected y
                                     all_curve_points[curve_idx].append(
-                                        (px_ext + x, py_ext + detected_y)
+                                        (px_ext + x, actual_detected_y)
                                     )
                                     break
+                            # If not overlapping, don't add any point - curve simply ends here
 
     # Handle curves that start late due to overlap at the beginning
     # Find the leftmost x where ANY curve is detected

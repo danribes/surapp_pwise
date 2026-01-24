@@ -686,13 +686,63 @@ class AxisCalibrator:
 
         return y_100_pixel
 
+    def detect_x0_from_curves(self) -> Optional[int]:
+        """
+        Detect the X pixel position where time=0 by finding where curves start.
+
+        KM curves always start at time=0, so the leftmost curve pixels
+        indicate where x=0 is in the plot.
+
+        Works for both color and grayscale images.
+
+        Returns:
+            X pixel position for time=0, or None if not detected
+        """
+        # Try color detection first (for colored curve images)
+        hsv = cv2.cvtColor(self.image, cv2.COLOR_BGR2HSV)
+        saturation = hsv[:, :, 1]
+        value = hsv[:, :, 2]
+        colored_mask = (saturation > 80) & (value > 50) & (value < 250)
+        colored_cols = np.where(np.any(colored_mask, axis=0))[0]
+
+        if len(colored_cols) > 10:
+            # Color image - use leftmost colored pixels
+            left_cols = colored_cols[:max(1, len(colored_cols) // 20)]
+            return int(np.median(left_cols))
+
+        # Grayscale image - detect dark curve pixels
+        if self.calibration is not None:
+            px, py, pw, ph = self.calibration.plot_rectangle
+            origin_x = self.calibration.origin[0]
+        else:
+            px, py = int(self.width * 0.1), int(self.height * 0.1)
+            pw, ph = int(self.width * 0.8), int(self.height * 0.7)
+            origin_x = px
+
+        # Look for dark pixels in the plot region
+        plot_region = self.gray[py:py+ph, px:px+pw]
+        _, binary = cv2.threshold(plot_region, 180, 255, cv2.THRESH_BINARY_INV)
+
+        # Find columns with dark pixels
+        dark_cols = np.where(np.sum(binary, axis=0) > ph * 0.02)[0]
+
+        if len(dark_cols) == 0:
+            return None
+
+        # The leftmost dark column (offset by px)
+        left_cols = dark_cols[:max(1, len(dark_cols) // 20)]
+        x_0_pixel = int(np.median(left_cols)) + px
+
+        return x_0_pixel
+
     def refine_plot_bounds_from_curves(self) -> Optional[tuple[int, int, int, int]]:
         """
         Refine the plot rectangle by detecting actual curve positions.
 
         This is more accurate than axis-line-based detection because:
-        1. KM curves always start at survival=1.0 (100%)
-        2. The topmost curve pixel indicates the true y=100 position
+        1. KM curves always start at time=0 and survival=1.0 (100%)
+        2. The leftmost curve pixel indicates the true x=0 position
+        3. The topmost curve pixel indicates the true y=100 position
 
         Returns:
             Refined (x, y, w, h) plot rectangle, or None if unable to refine
@@ -702,25 +752,35 @@ class AxisCalibrator:
 
         # Get current plot bounds
         px, py, pw, ph = self.calibration.plot_rectangle
+        origin_x = self.calibration.origin[0]  # X position of y-axis (time=0)
         origin_y = self.calibration.origin[1]  # Y position of x-axis (survival=0)
 
         # Detect Y=100 position from curves
         y_100_pixel = self.detect_y100_from_curves()
 
-        if y_100_pixel is None:
+        # Detect X=0 position from curves
+        x_0_pixel = self.detect_x0_from_curves()
+
+        # Start with current values
+        refined_px = px
+        refined_py = py
+        refined_pw = pw
+        refined_ph = ph
+
+        # Refine Y-axis if detected
+        if y_100_pixel is not None and y_100_pixel < origin_y and y_100_pixel >= 0:
+            refined_py = y_100_pixel
+            refined_ph = origin_y - y_100_pixel
+
+        # Refine X-axis if detected
+        if x_0_pixel is not None and x_0_pixel < px + pw and x_0_pixel >= 0:
+            # Adjust width to maintain right edge
+            right_edge = px + pw
+            refined_px = x_0_pixel
+            refined_pw = right_edge - x_0_pixel
+
+        # Sanity checks
+        if refined_ph < 50 or refined_pw < 50:
             return None
 
-        # Only refine if the detected position is reasonable
-        # (not too far from current estimate, and above the origin)
-        if y_100_pixel >= origin_y or y_100_pixel < 0:
-            return None
-
-        # Calculate refined bounds
-        refined_py = y_100_pixel
-        refined_ph = origin_y - y_100_pixel
-
-        # Sanity check: height should be positive and reasonable
-        if refined_ph < 50:
-            return None
-
-        return (px, refined_py, pw, refined_ph)
+        return (refined_px, refined_py, refined_pw, refined_ph)

@@ -359,6 +359,9 @@ def _clean_curve_data(points, tolerance=0.005):
     # Sort by time
     sorted_points = sorted(points, key=lambda p: p[0])
 
+    # Clip negative times to 0 (KM curves must start at time=0)
+    sorted_points = [(max(0.0, t), s) for t, s in sorted_points]
+
     # Remove duplicate times (keep point with median survival)
     time_groups = {}
     for t, s in sorted_points:
@@ -391,7 +394,7 @@ def _clean_curve_data(points, tolerance=0.005):
     if first_t > 0.01:
         deduplicated.insert(0, (0.0, 1.0))
     # If first point is at time ~0 but survival != 1.0, fix it
-    elif first_s < 0.99:
+    elif first_s < 0.999:
         deduplicated[0] = (0.0, 1.0)
 
     # Enforce monotonicity (survival can only decrease or stay flat)
