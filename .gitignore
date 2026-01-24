@@ -10,7 +10,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/
@@ -51,8 +50,6 @@ htmlcov/
 results/
 test_output/
 
-# Test files
-*.pdf
-*.jpg
-*.jpeg
-*.png
+# Dev files
+.claude/
+CLAUDE.md
