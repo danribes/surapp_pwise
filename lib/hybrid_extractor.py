@@ -40,7 +40,7 @@ except ImportError:
     HAS_COLOR_DETECTOR = False
 
 try:
-    from .calibrator import Calibrator
+    from .calibrator import AxisCalibrator
     HAS_CALIBRATOR = True
 except ImportError:
     HAS_CALIBRATOR = False
