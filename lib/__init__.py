@@ -136,3 +136,40 @@ if _AI_CURVE_EXTRACTOR_AVAILABLE:
         'ExtractedCurve',
         'get_ai_curve_extractor',
     ])
+
+# Hybrid extractor (AI + pixel-based)
+try:
+    from .hybrid_extractor import (
+        HybridExtractor, HybridExtractionResult,
+        CurveIdentification, IsolatedCurve, ExtractedCurveResult,
+        hybrid_extract
+    )
+    _HYBRID_AVAILABLE = True
+    __all__.extend([
+        'HybridExtractor',
+        'HybridExtractionResult',
+        'CurveIdentification',
+        'IsolatedCurve',
+        'ExtractedCurveResult',
+        'hybrid_extract',
+    ])
+except ImportError:
+    _HYBRID_AVAILABLE = False
+
+# Color transformation utilities
+try:
+    from .color_transform import (
+        ColorTransformer, ColorTransformResult,
+        extract_curve_from_marks, validate_curve_extraction,
+        auto_transform_and_extract
+    )
+    _COLOR_TRANSFORM_AVAILABLE = True
+    __all__.extend([
+        'ColorTransformer',
+        'ColorTransformResult',
+        'extract_curve_from_marks',
+        'validate_curve_extraction',
+        'auto_transform_and_extract',
+    ])
+except ImportError:
+    _COLOR_TRANSFORM_AVAILABLE = False
