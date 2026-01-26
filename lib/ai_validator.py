@@ -8,8 +8,12 @@ by comparing original images with extracted overlays.
 import base64
 import re
 import time
+import tempfile
 from pathlib import Path
 from typing import Optional, Union
+
+import cv2
+import numpy as np
 
 try:
     import ollama
@@ -111,6 +115,63 @@ class AIValidator:
         with open(image_path, 'rb') as f:
             return base64.b64encode(f.read()).decode('utf-8')
 
+    def _combine_images_side_by_side(
+        self,
+        image1_path: Union[str, Path],
+        image2_path: Union[str, Path]
+    ) -> str:
+        """
+        Combine two images side-by-side into a single image.
+
+        This is needed because llama3.2-vision only supports one image per request.
+
+        Args:
+            image1_path: Path to the first image (original)
+            image2_path: Path to the second image (overlay)
+
+        Returns:
+            Path to the combined temporary image
+        """
+        img1 = cv2.imread(str(image1_path))
+        img2 = cv2.imread(str(image2_path))
+
+        if img1 is None or img2 is None:
+            raise ValueError("Failed to load one or both images")
+
+        # Resize images to same height if needed
+        h1, w1 = img1.shape[:2]
+        h2, w2 = img2.shape[:2]
+
+        target_h = max(h1, h2)
+
+        if h1 != target_h:
+            scale = target_h / h1
+            img1 = cv2.resize(img1, (int(w1 * scale), target_h))
+            w1 = img1.shape[1]
+
+        if h2 != target_h:
+            scale = target_h / h2
+            img2 = cv2.resize(img2, (int(w2 * scale), target_h))
+            w2 = img2.shape[1]
+
+        # Create side-by-side image with divider
+        divider_width = 10
+        combined = np.zeros((target_h, w1 + divider_width + w2, 3), dtype=np.uint8)
+        combined[:, :w1] = img1
+        combined[:, w1:w1+divider_width] = [255, 255, 255]  # White divider
+        combined[:, w1+divider_width:] = img2
+
+        # Add labels
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(combined, "ORIGINAL", (10, 30), font, 1, (0, 255, 0), 2)
+        cv2.putText(combined, "EXTRACTED", (w1 + divider_width + 10, 30), font, 1, (0, 255, 0), 2)
+
+        # Save to temp file
+        temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+        cv2.imwrite(temp_file.name, combined)
+
+        return temp_file.name
+
     def _parse_response(self, response_text: str) -> ValidationResult:
         """Parse the AI response into a structured result."""
         # Default values
@@ -190,20 +251,44 @@ class AIValidator:
         if not self.ensure_model(quiet=quiet):
             return None
 
+        combined_path = None
         try:
             client = ollama.Client(host=self.config.host)
 
             if not quiet:
                 print("Validating extraction with AI...")
 
-            # Send both images to the vision model
+            # Combine images side-by-side (llama3.2-vision only supports one image)
+            combined_path = self._combine_images_side_by_side(original_image, overlay_image)
+
+            # Updated prompt for side-by-side comparison
+            combined_prompt = """Analyze this side-by-side comparison of a Kaplan-Meier survival curve plot.
+
+LEFT SIDE (labeled "ORIGINAL"): The original plot image
+RIGHT SIDE (labeled "EXTRACTED"): The extracted curves overlaid on the original
+
+Your task is to validate if the extraction is accurate. Check:
+1. Do the extracted colored lines on the RIGHT follow the original curves precisely?
+2. Are there any sections where the extraction deviates from the original?
+3. Are all curves from the original captured in the extraction?
+4. Do the curves start at the correct position (usually survival=1.0 at time=0)?
+5. Are the curve endpoints correctly captured?
+
+Respond in this exact format:
+MATCH: [YES/NO/PARTIAL]
+CONFIDENCE: [0.0-1.0]
+ISSUES: [List any specific issues found, or "None" if perfect match]
+SUGGESTIONS: [Parameter adjustments if needed, or "None"]
+"""
+
+            # Send combined image to the vision model
             response = client.chat(
                 model=self.config.model,
                 messages=[
                     {
                         'role': 'user',
-                        'content': self.config.validation_prompt,
-                        'images': [str(original_image), str(overlay_image)]
+                        'content': combined_prompt,
+                        'images': [combined_path]
                     }
                 ],
                 options={
@@ -223,6 +308,15 @@ class AIValidator:
             if not quiet:
                 print(f"Validation error: {e}")
             return None
+
+        finally:
+            # Clean up temp file
+            if combined_path:
+                try:
+                    import os
+                    os.unlink(combined_path)
+                except Exception:
+                    pass
 
     def validate_with_retry(
         self,
