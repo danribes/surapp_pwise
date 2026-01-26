@@ -8,8 +8,21 @@ pandas>=2.0.0
 matplotlib>=3.7.0
 Pillow>=10.0.0
 
-# Optional: OCR for axis label detection
-# pytesseract>=0.3.10
+# Optional: OCR for at-risk table extraction (Guyot algorithm support)
+# Install one of these for at-risk table extraction:
+easyocr>=1.7.0  # Recommended: no external binary needed
+# pytesseract>=0.3.10  # Alternative: requires Tesseract binary
+
+# Optional: PDF import support for at-risk tables
+pdfplumber>=0.10.0
 
 # Optional: Excel export support
 # openpyxl>=3.1.0
+
+# Optional: AI-assisted extraction (requires Ollama running)
+# Install with: pip install ollama httpx
+ollama>=0.2.0  # Ollama Python client for vision model integration
+httpx>=0.25.0  # HTTP client for Ollama API
+
+# Optional: scipy for curve interpolation/reconstruction
+scipy>=1.11.0

@@ -69,7 +69,7 @@ class LineStyleDetector:
     """
 
     def __init__(self, image: np.ndarray, plot_bounds: Optional[Tuple[int, int, int, int]] = None,
-                 filter_reference_lines: bool = True):
+                 filter_reference_lines: bool = True, preprocess_text_removal: bool = False):
         """
         Initialize the detector.
 
@@ -79,15 +79,22 @@ class LineStyleDetector:
                         If None, uses the entire image.
             filter_reference_lines: Whether to filter out horizontal/vertical reference lines.
                         Set to False for debugging.
+            preprocess_text_removal: Whether to remove text from image before processing.
+                        This can help when text overlaps with curves.
         """
         self.original_image = image
         self.filter_reference_lines_enabled = filter_reference_lines
+        self.preprocess_text_removal = preprocess_text_removal
 
         # Convert to grayscale if needed
         if len(image.shape) == 3:
             self.gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         else:
             self.gray = image.copy()
+
+        # Optional text removal preprocessing
+        if preprocess_text_removal:
+            self.gray = self._preprocess_remove_text(self.gray)
 
         # Set plot bounds
         if plot_bounds is not None:
@@ -100,6 +107,68 @@ class LineStyleDetector:
         self.segments = []
         self.traced_curves = []
         self.vertical_line_x_positions = set()  # Will be populated by reference line filtering
+
+    def _preprocess_remove_text(self, gray: np.ndarray) -> np.ndarray:
+        """
+        Remove text from the grayscale image before curve detection.
+
+        This uses OCR to identify text regions and inpaints them with
+        the background color, which prevents text from being connected
+        to curves during thresholding.
+
+        Args:
+            gray: Grayscale image
+
+        Returns:
+            Grayscale image with text regions removed
+        """
+        try:
+            import pytesseract
+
+            h, w = gray.shape[:2]
+
+            # Detect text regions
+            data = pytesseract.image_to_data(gray, output_type=pytesseract.Output.DICT, timeout=30)
+
+            # Create text mask
+            text_mask = np.zeros((h, w), dtype=np.uint8)
+
+            for i in range(len(data['text'])):
+                text = data['text'][i].strip()
+                conf = int(data['conf'][i]) if data['conf'][i] != '-1' else 0
+
+                if conf > 20 and len(text) > 0:
+                    x = data['left'][i]
+                    y = data['top'][i]
+                    tw = data['width'][i]
+                    th = data['height'][i]
+
+                    # Add padding
+                    padding = 3
+                    x1 = max(0, x - padding)
+                    y1 = max(0, y - padding)
+                    x2 = min(w, x + tw + padding)
+                    y2 = min(h, y + th + padding)
+
+                    text_mask[y1:y2, x1:x2] = 255
+
+            # Don't dilate - we want to preserve curve pixels
+            # Only remove text that was actually detected
+
+            if np.sum(text_mask) > 0:
+                # Inpaint with background color (white for KM plots)
+                result = cv2.inpaint(
+                    cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR),
+                    text_mask,
+                    inpaintRadius=3,
+                    flags=cv2.INPAINT_TELEA
+                )
+                return cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+
+        except Exception as e:
+            print(f"    Text preprocessing failed: {e}")
+
+        return gray
 
     def detect_all_curves(self, expected_count: Optional[int] = None,
                           debug_dir: Optional[str] = None) -> List[DetectedCurve]:
@@ -137,6 +206,11 @@ class LineStyleDetector:
         # This ensures the crossing fix can work on complete data
         self._smooth_traced_curves(self.traced_curves)
 
+        # Phase 3c: Use dash_mask to fix tracking errors where curves got swapped
+        # This is more reliable than position-based ordering since it uses actual style info
+        if len(self.traced_curves) == 2 and hasattr(self, 'dash_mask') and self.dash_mask is not None:
+            self._fix_tracking_with_dash_mask()
+
         # Phase 4: Analyze line style for each traced curve AFTER fixing crossings
         # Use pixel-based analysis for more accurate style detection
         for i, curve in enumerate(self.traced_curves):
@@ -151,14 +225,16 @@ class LineStyleDetector:
             curve.confidence = confidence
 
         # Phase 4b: For KM curves, relabel based on relative position
-        # The dashed curve typically has better survival (higher) than solid
-        # Find a region where curves are separated and determine which is higher
+        # Use visual characteristics (dash patterns, density) to determine style
+        # Do NOT assume which treatment has better survival - this varies by study
         if expected_count == 2 and len(self.traced_curves) == 2:
             self._relabel_curves_by_position()
-            # Fix any regions where curves have swapped identities
-            self._fix_curve_swaps()
-            # Fix any incorrect curve crossings in the tail region
-            self._fix_tail_curve_crossings()
+            # NOTE: _fix_curve_swaps() disabled - it incorrectly assumed dashed=better survival
+            # Style detection should be purely visual, not based on outcome assumptions
+            # self._fix_curve_swaps()
+            # NOTE: _fix_tail_curve_crossings() also disabled - same incorrect assumption
+            # The dashed curve doesn't always have better survival than solid
+            # self._fix_tail_curve_crossings()
 
         # Phase 5: Convert traced curves to DetectedCurve format
         curves = self._build_detected_curves()
@@ -1195,9 +1271,9 @@ class LineStyleDetector:
 
         # For each x, find all y positions with pixels
         # Use position-dependent Y filtering:
-        # - Left/middle portion: minimal filtering to capture curves near survival=1.0
+        # - Left/middle portion: NO top filtering to capture curves at survival=1.0 (y=0)
         # - Right portion (where legend text is): more aggressive filtering
-        y_min_base = int(height * 0.02)  # Filter top 2% for title
+        y_min_base = 0  # No top filter - curves start at y=0 (survival=1.0)
         y_min_legend = int(height * 0.15)  # Filter top 15% in legend area
         y_max_valid = int(height * 0.95)  # Filter bottom 5% for axis labels
         legend_x_start = int(width * 0.75)  # Legend typically in right 25%
@@ -1380,6 +1456,154 @@ class LineStyleDetector:
         print(f"    Style validation: curve0 dash_overlap={overlap0:.2f} presence={presence0:.2f}")
         print(f"    Style validation: curve1 dash_overlap={overlap1:.2f} presence={presence1:.2f}")
 
+        # NEW: Direct scan of the plot to find which Y levels have dash patterns
+        # Scan in the MIDDLE portion where curves are well separated
+        def find_dashed_y_level():
+            """
+            Scan the middle portion (40-70%) of the plot at curve Y positions
+            to find which curve has a clear dash pattern.
+            The middle portion is where KM curves are typically well separated.
+            """
+            # Get X range for middle portion (40-70% of plot)
+            x_start = int(self.plot_w * 0.40)
+            x_end = int(self.plot_w * 0.70)
+
+            if x_end - x_start < 30:
+                return None, None
+
+            # Get the Y positions of both curves in this region
+            y0_values = [curve0.y_positions[x] for x in range(x_start, x_end) if x in curve0.y_positions]
+            y1_values = [curve1.y_positions[x] for x in range(x_start, x_end) if x in curve1.y_positions]
+
+            if len(y0_values) < 10 or len(y1_values) < 10:
+                print(f"    WARNING: Not enough Y values in rightmost region: curve0={len(y0_values)}, curve1={len(y1_values)}")
+                return None, None
+
+            # Get average Y for each curve in this region
+            y0_avg = int(np.mean(y0_values))
+            y1_avg = int(np.mean(y1_values))
+            print(f"    Middle region Y averages: curve0={y0_avg} (range {min(y0_values):.0f}-{max(y0_values):.0f}), curve1={y1_avg} (range {min(y1_values):.0f}-{max(y1_values):.0f})")
+
+            # Use the MODE of Y values (most common Y) instead of average
+            # This helps when curves have varying Y positions
+            from collections import Counter
+            y0_mode = Counter([int(y) for y in y0_values]).most_common(1)[0][0]
+            y1_mode = Counter([int(y) for y in y1_values]).most_common(1)[0][0]
+
+            # Also get the Y value at the rightmost X position for each curve
+            max_x0 = max([x for x in range(x_start, x_end) if x in curve0.y_positions], default=x_start)
+            max_x1 = max([x for x in range(x_start, x_end) if x in curve1.y_positions], default=x_start)
+            y0_rightmost = int(curve0.y_positions.get(max_x0, y0_avg))
+            y1_rightmost = int(curve1.y_positions.get(max_x1, y1_avg))
+
+            print(f"    Y modes: curve0={y0_mode}, curve1={y1_mode}")
+            print(f"    Y at rightmost X: curve0={y0_rightmost} (x={max_x0}), curve1={y1_rightmost} (x={max_x1})")
+
+            # Use the rightmost Y values for scanning (most representative of where curve ends)
+            # Determine which is upper (lower Y) and which is lower (higher Y)
+            upper_y = min(y0_rightmost, y1_rightmost)
+            lower_y = max(y0_rightmost, y1_rightmost)
+            upper_is_curve0 = (y0_rightmost <= y1_rightmost)
+
+            # Now scan at both Y levels and count gaps
+            def count_gaps_at_y(y_pos):
+                img_y = y_pos + self.plot_y
+                if img_y < 3 or img_y >= self.gray.shape[0] - 3:
+                    return 0, 0
+
+                gaps = []
+                current_gap = 0
+                dark_count = 0
+
+                for x in range(x_start, x_end):
+                    img_x = x + self.plot_x
+                    if 0 <= img_x < self.gray.shape[1]:
+                        # Use a narrow band (5 pixels) centered on the Y position
+                        band = self.gray[img_y - 2:img_y + 3, img_x]
+                        min_val = np.min(band) if band.size > 0 else 255
+
+                        if min_val > 200:  # White = gap
+                            current_gap += 1
+                        else:
+                            if min_val < 150:
+                                dark_count += 1
+                            if current_gap >= 3:
+                                gaps.append(current_gap)
+                            current_gap = 0
+
+                if current_gap >= 3:
+                    gaps.append(current_gap)
+
+                return len(gaps), dark_count
+
+            upper_gaps, upper_dark = count_gaps_at_y(upper_y)
+            lower_gaps, lower_dark = count_gaps_at_y(lower_y)
+
+            print(f"    Direct Y scan: upper Y={upper_y} ({upper_gaps} gaps, {upper_dark} dark), lower Y={lower_y} ({lower_gaps} gaps, {lower_dark} dark)")
+            print(f"    Scan range: x={x_start} to {x_end} (plot), img_y_upper={upper_y + self.plot_y}, img_y_lower={lower_y + self.plot_y}")
+
+            x_range = x_end - x_start
+            return upper_is_curve0, upper_gaps, lower_gaps, upper_dark, lower_dark, x_range
+
+        result = find_dashed_y_level()
+        if result and result[0] is not None:
+            upper_is_curve0, upper_gaps, lower_gaps, upper_dark, lower_dark, x_range = result
+
+            # Key insight: DASHED lines have FEWER dark pixels per unit length
+            # because the gaps reduce the total number of dark pixels
+            # Calculate dark pixel density (dark per position)
+            upper_density = upper_dark / x_range if x_range > 0 else 0
+            lower_density = lower_dark / x_range if x_range > 0 else 0
+
+            # The curve with LOWER dark density is more likely dashed
+            # (fewer dark pixels = more gaps = dashed)
+            # Calculate the relative density difference
+            max_density = max(upper_density, lower_density)
+            if max_density > 0.1:
+                # The curve with significantly lower density is dashed
+                upper_is_dashed_by_density = (lower_density > upper_density * 1.3)
+                lower_is_dashed_by_density = (upper_density > lower_density * 1.3)
+            else:
+                upper_is_dashed_by_density = False
+                lower_is_dashed_by_density = False
+
+            print(f"    Dark density: upper={upper_density:.2f}, lower={lower_density:.2f}")
+            print(f"    Density ratio: upper/lower={upper_density/lower_density if lower_density > 0 else 'inf':.2f}")
+
+            # If one curve has significantly lower density, it's dashed
+            if lower_is_dashed_by_density:
+                # Lower curve (in image) has lower density = more gaps = DASHED
+                print(f"    Density analysis: LOWER curve is dashed (density {lower_density:.2f} < {upper_density:.2f})")
+                if upper_is_curve0:
+                    print(f"    Setting: curve0=solid (upper), curve1=dashed (lower)")
+                    curve0.style = LineStyle.SOLID
+                    curve0.confidence = 0.85
+                    curve1.style = LineStyle.DASHED
+                    curve1.confidence = 0.85
+                else:
+                    print(f"    Setting: curve0=dashed (lower), curve1=solid (upper)")
+                    curve0.style = LineStyle.DASHED
+                    curve0.confidence = 0.85
+                    curve1.style = LineStyle.SOLID
+                    curve1.confidence = 0.85
+                return  # Skip old analysis
+            elif upper_is_dashed_by_density:
+                # Upper curve (in image) has lower density = more gaps = DASHED
+                print(f"    Density analysis: UPPER curve is dashed (density {upper_density:.2f} < {lower_density:.2f})")
+                if upper_is_curve0:
+                    print(f"    Setting: curve0=dashed (upper), curve1=solid (lower)")
+                    curve0.style = LineStyle.DASHED
+                    curve0.confidence = 0.85
+                    curve1.style = LineStyle.SOLID
+                    curve1.confidence = 0.85
+                else:
+                    print(f"    Setting: curve0=solid (lower), curve1=dashed (upper)")
+                    curve0.style = LineStyle.SOLID
+                    curve0.confidence = 0.85
+                    curve1.style = LineStyle.DASHED
+                    curve1.confidence = 0.85
+                return  # Skip old analysis
+
         # Also check gap regularity - true dashed lines have REGULAR gaps
         # Use pre-dilation binary to preserve dash gaps
         def calc_gap_regularity(curve):
@@ -1543,13 +1767,45 @@ class LineStyleDetector:
         print(f"    Grayscale analysis: curve1 gap_ratio={gap_ratio1:.2f} ({num_gaps1} gaps, reg={reg1:.2f})")
 
         # Determine which curve should be dashed:
-        # Higher gap_ratio = more likely dashed (has visible gaps)
-        # Higher regularity = more likely true dash pattern
-        dash_score0 = gap_ratio0 * 2 + reg0 * 0.5 + (num_gaps0 / 30 if num_gaps0 > 3 else 0)
-        dash_score1 = gap_ratio1 * 2 + reg1 * 0.5 + (num_gaps1 / 30 if num_gaps1 > 3 else 0)
+        # TRUE dashes have:
+        # - REGULAR gaps (high regularity score)
+        # - MODERATE number of gaps (5-30 range is typical)
+        # - Reasonable gap ratio (0.15-0.40 is typical for dashes)
+        #
+        # NOISE gaps have:
+        # - Irregular gaps (low regularity)
+        # - Too many gaps (>40 suggests tracking issues)
+        # - Either very low or very high gap ratio
+
+        def compute_dash_likelihood(gap_ratio, num_gaps, regularity):
+            score = 0.0
+
+            # Regularity is the strongest indicator of true dashes
+            score += regularity * 3.0
+
+            # Moderate gap ratio (0.15-0.40) typical for dashes
+            if 0.15 <= gap_ratio <= 0.40:
+                score += 1.0
+            elif gap_ratio > 0.40:
+                # High gap ratio could be many small gaps (noise)
+                score += 0.5 * (1.0 - min(1.0, (gap_ratio - 0.40) / 0.30))
+
+            # Moderate number of gaps (5-30) typical for dashes
+            if 5 <= num_gaps <= 30:
+                score += 0.8
+            elif num_gaps > 30:
+                # Too many gaps suggests noise, not true dashes
+                score -= (num_gaps - 30) / 50.0
+
+            return max(0, score)
+
+        dash_score0 = compute_dash_likelihood(gap_ratio0, num_gaps0, reg0)
+        dash_score1 = compute_dash_likelihood(gap_ratio1, num_gaps1, reg1)
+
+        print(f"    Dash likelihood scores: curve0={dash_score0:.2f}, curve1={dash_score1:.2f}")
 
         # Only relabel if there's a clear difference
-        if abs(dash_score0 - dash_score1) > 0.05:
+        if abs(dash_score0 - dash_score1) > 0.2:
             if dash_score0 > dash_score1:
                 # Curve 0 should be dashed
                 if curve0.style != LineStyle.DASHED or curve1.style != LineStyle.SOLID:
@@ -2326,6 +2582,181 @@ class LineStyleDetector:
         if swaps_made > 0:
             print(f"    Swapped {swaps_made} points in {len(wrong_segments)} segment(s)")
 
+    def _fix_tracking_with_dash_mask(self):
+        """
+        Use dash_mask to verify and fix tracking errors using a segment-based approach.
+
+        This method:
+        1. Finds contiguous segments where curves have a consistent relative ordering
+        2. For each segment, determines if it's correctly ordered using dash_mask
+        3. Swaps entire segments that are incorrectly ordered
+        """
+        if len(self.traced_curves) != 2:
+            return
+
+        if not hasattr(self, 'dash_mask') or self.dash_mask is None:
+            return
+
+        curve0 = self.traced_curves[0]
+        curve1 = self.traced_curves[1]
+
+        # Get common X positions where both curves have data
+        common_x = sorted(set(curve0.y_positions.keys()) & set(curve1.y_positions.keys()))
+
+        if len(common_x) < 10:
+            return
+
+        # Step 1: Find segments where curves have consistent relative ordering
+        # A "crossing" occurs when the relative Y-order of curves changes
+        min_sep = 3  # Minimum separation to consider curves as distinct
+
+        segments = []  # List of (start_idx, end_idx, curve0_is_above)
+        seg_start = None
+        prev_order = None  # True if curve0 is above (lower Y), False if below
+
+        for i, x in enumerate(common_x):
+            y0 = curve0.y_positions[x]
+            y1 = curve1.y_positions[x]
+            sep = y1 - y0  # Positive if curve0 is above
+
+            if abs(sep) < min_sep:
+                # Curves too close - indeterminate
+                if seg_start is not None:
+                    # End current segment
+                    segments.append((seg_start, i - 1, prev_order))
+                    seg_start = None
+                    prev_order = None
+                continue
+
+            current_order = sep > 0  # True if curve0 is above
+
+            if prev_order is None:
+                # Start new segment
+                seg_start = i
+                prev_order = current_order
+            elif current_order != prev_order:
+                # Order changed - end segment and start new one
+                segments.append((seg_start, i - 1, prev_order))
+                seg_start = i
+                prev_order = current_order
+
+        # Close final segment
+        if seg_start is not None:
+            segments.append((seg_start, len(common_x) - 1, prev_order))
+
+        if not segments:
+            return
+
+        # Step 2: For each segment, calculate dash_mask overlap to verify correctness
+        # Accumulate evidence across all segments to determine overall which curve is dashed
+        total_evidence = []  # (segment_len, curve0_dash_score, curve1_dash_score, curve0_is_above)
+
+        for seg_start, seg_end, curve0_is_above in segments:
+            seg_len = seg_end - seg_start + 1
+            if seg_len < 5:
+                continue  # Skip very short segments
+
+            dash_0 = 0
+            dash_1 = 0
+
+            for i in range(seg_start, seg_end + 1):
+                x = common_x[i]
+                y0 = int(curve0.y_positions[x])
+                y1 = int(curve1.y_positions[x])
+
+                # Check dash_mask at each curve's position
+                for dy in range(-1, 2):
+                    y0_check = y0 + dy
+                    y1_check = y1 + dy
+
+                    if 0 <= y0_check < self.dash_mask.shape[0] and 0 <= x < self.dash_mask.shape[1]:
+                        if self.dash_mask[y0_check, x] > 0:
+                            dash_0 += 1
+
+                    if 0 <= y1_check < self.dash_mask.shape[0] and 0 <= x < self.dash_mask.shape[1]:
+                        if self.dash_mask[y1_check, x] > 0:
+                            dash_1 += 1
+
+            total_evidence.append((seg_len, dash_0, dash_1, curve0_is_above))
+
+        if not total_evidence:
+            return
+
+        # Step 3: Determine which curve is dashed using weighted voting
+        # Weight by segment length and dash score difference
+        weighted_votes_curve0_dashed = 0
+        weighted_votes_curve1_dashed = 0
+
+        for seg_len, dash_0, dash_1, _ in total_evidence:
+            diff = abs(dash_0 - dash_1)
+            weight = seg_len * max(1, diff)  # Longer segments with clearer patterns count more
+
+            if dash_0 > dash_1:
+                weighted_votes_curve0_dashed += weight
+            elif dash_1 > dash_0:
+                weighted_votes_curve1_dashed += weight
+
+        curve0_is_dashed = weighted_votes_curve0_dashed > weighted_votes_curve1_dashed
+
+        print(f"    Dash-based tracking fix: votes curve0_dashed={weighted_votes_curve0_dashed}, curve1_dashed={weighted_votes_curve1_dashed}")
+        print(f"    Determined: curve0 is {'DASHED' if curve0_is_dashed else 'SOLID'}")
+
+        # Step 4: Identify segments that need swapping
+        # A segment needs swapping if its local dash pattern disagrees with the overall determination
+        segments_to_swap = []
+
+        for seg_start, seg_end, curve0_is_above in segments:
+            seg_len = seg_end - seg_start + 1
+            if seg_len < 3:
+                continue
+
+            # Calculate local dash scores
+            local_dash_0 = 0
+            local_dash_1 = 0
+
+            for i in range(seg_start, seg_end + 1):
+                x = common_x[i]
+                y0 = int(curve0.y_positions[x])
+                y1 = int(curve1.y_positions[x])
+
+                for dy in range(-1, 2):
+                    y0_check = y0 + dy
+                    y1_check = y1 + dy
+
+                    if 0 <= y0_check < self.dash_mask.shape[0] and 0 <= x < self.dash_mask.shape[1]:
+                        if self.dash_mask[y0_check, x] > 0:
+                            local_dash_0 += 1
+
+                    if 0 <= y1_check < self.dash_mask.shape[0] and 0 <= x < self.dash_mask.shape[1]:
+                        if self.dash_mask[y1_check, x] > 0:
+                            local_dash_1 += 1
+
+            # Determine local pattern
+            local_curve0_is_dashed = local_dash_0 > local_dash_1
+
+            # Check if this segment is inconsistent with overall determination
+            if local_curve0_is_dashed != curve0_is_dashed:
+                # This segment has the curves swapped
+                segments_to_swap.append((seg_start, seg_end))
+
+        # Step 5: Swap Y positions for all identified segments
+        swaps_made = 0
+        for seg_start, seg_end in segments_to_swap:
+            for i in range(seg_start, seg_end + 1):
+                x = common_x[i]
+                y0 = curve0.y_positions[x]
+                y1 = curve1.y_positions[x]
+                curve0.y_positions[x] = y1
+                curve1.y_positions[x] = y0
+                swaps_made += 1
+
+        if swaps_made > 0:
+            print(f"    Dash-mask tracking fix: swapped {swaps_made} points in {len(segments_to_swap)} segment(s)")
+            for seg_start, seg_end in segments_to_swap:
+                x_start = common_x[seg_start]
+                x_end = common_x[seg_end]
+                print(f"      Swapped segment: x={x_start} to {x_end}")
+
     def _count_y_clusters(self, y_vals: np.ndarray, min_gap: int = 8) -> int:
         """Count distinct Y clusters in an array of Y values."""
         if len(y_vals) == 0:
@@ -2431,6 +2862,26 @@ class LineStyleDetector:
                 solid_center = float(np.median(solid_y))
                 return sorted([dashed_center, solid_center])
 
+            # NEW: When dash_mask doesn't help (all pixels same type),
+            # try to split based on Y-span if the cluster is thick enough
+            # KM curves at same X should have different Y values (one above other)
+            if len(y_vals) >= 4:  # Need enough pixels to potentially split
+                y_arr = np.array(sorted(y_vals))
+                y_span = y_arr[-1] - y_arr[0]
+                # If the Y-span is >= 4 pixels, there might be two curves
+                # (typical line thickness is 2-3 pixels)
+                if y_span >= 4:
+                    # Split into upper and lower halves
+                    mid_y = (y_arr[0] + y_arr[-1]) / 2
+                    upper_y = y_arr[y_arr <= mid_y]
+                    lower_y = y_arr[y_arr > mid_y]
+                    if len(upper_y) > 0 and len(lower_y) > 0:
+                        upper_center = float(np.median(upper_y))
+                        lower_center = float(np.median(lower_y))
+                        # Only split if centers are sufficiently apart (> line thickness)
+                        if abs(lower_center - upper_center) >= 3:
+                            return sorted([upper_center, lower_center])
+
         return clusters
 
     def _assign_clusters_to_curves(
@@ -2492,12 +2943,35 @@ class LineStyleDetector:
 
         # If this is the first X with data, initialize curves with clusters
         if all(p is None for p in prev_positions):
-            # For KM curves, both should start at survival 1.0 (top = lowest y)
-            # Only use the TOP cluster for initialization to avoid artifacts
-            top_cluster = clusters[0]  # clusters are sorted, first is lowest y (highest survival)
-            for curve in curves:
-                curve.y_positions[x] = top_cluster
-                curve.pixel_presence[x] = True
+            # For KM curves at t≈0, both should start at survival 1.0 (top = lowest y)
+            # But if we're past the very early region AND clusters are clearly separated,
+            # initialize with different clusters to capture divergence
+            very_early_x = self.plot_w * 0.08  # First 8% of plot width
+
+            if x < very_early_x or len(clusters) < 2:
+                # Use top cluster for all curves at very start
+                top_cluster = clusters[0]  # clusters are sorted, first is lowest y
+                for curve in curves:
+                    curve.y_positions[x] = top_cluster
+                    curve.pixel_presence[x] = True
+            else:
+                # Past very early region with 2+ clusters: check separation
+                cluster_gap = clusters[1] - clusters[0] if len(clusters) >= 2 else 0
+
+                if cluster_gap >= 3:  # Clusters are clearly separated
+                    # Assign curve 0 to top cluster, curve 1 to bottom cluster
+                    for i, curve in enumerate(curves):
+                        if i < len(clusters):
+                            curve.y_positions[x] = clusters[i]
+                        else:
+                            curve.y_positions[x] = clusters[0]
+                        curve.pixel_presence[x] = True
+                else:
+                    # Clusters too close, use top for all
+                    top_cluster = clusters[0]
+                    for curve in curves:
+                        curve.y_positions[x] = top_cluster
+                        curve.pixel_presence[x] = True
             return
 
         # Match clusters to curves based on proximity to expected position
@@ -2797,12 +3271,14 @@ class LineStyleDetector:
 
     def _analyze_dash_pattern_directly(self, curve: TracedCurve) -> Tuple[LineStyle, float]:
         """
-        Analyze the curve for dash patterns by checking actual pixel presence
-        at tracked positions and by scanning the grayscale intensity.
+        Analyze the curve for dash patterns by scanning the ORIGINAL grayscale image
+        along the curve path, looking for TRUE gaps (white regions).
 
-        Two-pronged approach:
-        1. Use the pixel_presence tracking from curve tracing
-        2. Check grayscale intensity variations along the curve path
+        Key approach:
+        1. Scan original grayscale with a wider band (5 pixels) to catch line thickness
+        2. Look for TRUE gaps: consecutive X positions where minimum intensity > 180
+        3. True dashed lines have multiple regular gaps of 3+ pixels wide
+        4. Solid lines might have occasional noise gaps but they're small/irregular
         """
         if not curve.y_positions:
             return LineStyle.UNKNOWN, 0.0
@@ -2811,183 +3287,146 @@ class LineStyleDetector:
         if len(x_positions) < 30:
             return LineStyle.UNKNOWN, 0.3
 
-        # METHOD 1: Use pixel_presence from tracking
-        # This directly shows where pixels were found vs gaps
-        if curve.pixel_presence:
-            presence_from_tracking = [curve.pixel_presence.get(x, False) for x in x_positions]
-            tracking_present = sum(1 for p in presence_from_tracking if p)
-            tracking_ratio = tracking_present / len(presence_from_tracking) if presence_from_tracking else 1.0
-        else:
-            tracking_ratio = 1.0
+        # CRITICAL: Scan the ORIGINAL grayscale image directly (not binary)
+        # Use a 5-pixel band around the curve Y position to account for thickness
+        x_min_curve = min(x_positions)
+        x_max_curve = max(x_positions)
 
-        # METHOD 2: Check grayscale intensity along the curve path
-        # Dashed lines will have alternating dark/light sections in original image
-        # Note: Add plot offsets since binary mask is cropped but gray is full image
-        intensity_pattern = []
-        for x in x_positions:
-            y = int(curve.y_positions[x])
-            # Convert from binary mask coordinates to full image coordinates
-            img_x = x + self.plot_x
-            img_y = y + self.plot_y
-            y_min = max(0, img_y - 1)
-            y_max = min(self.gray.shape[0], img_y + 2)
-            x_min = max(0, img_x)
-            x_max = min(self.gray.shape[1], img_x + 1)
-            # Get minimum intensity (darkest pixel) in the band
-            band = self.gray[y_min:y_max, x_min:x_max]
-            if band.size > 0:
-                intensity_pattern.append(np.min(band))
-            else:
-                intensity_pattern.append(255)  # Default to white if out of bounds
-
-        intensity_pattern = np.array(intensity_pattern)
-
-        # Count dark pixels (intensity < 80 - actual curve pixels)
-        dark_threshold = 80
-        is_dark = intensity_pattern < dark_threshold
-        dark_ratio = np.sum(is_dark) / len(is_dark) if len(is_dark) > 0 else 1.0
-
-        # METHOD 3: Scan for gaps by checking every consecutive X
-        # Use the pre-dilation binary to preserve dash patterns
-        analysis_binary = getattr(self, 'binary_before_dilation', self.binary)
-
-        x_min = min(x_positions)
-        x_max = max(x_positions)
-        all_x = list(range(x_min, x_max + 1))
+        # Interpolate Y positions for every X in the curve range
+        all_x = list(range(x_min_curve, x_max_curve + 1))
         interpolated_y = np.interp(all_x, x_positions,
                                    [curve.y_positions[x] for x in x_positions])
 
-        presence_pattern = []
+        # Scan grayscale for each X position
+        min_intensities = []
         for i, x in enumerate(all_x):
             y = int(interpolated_y[i])
-            y_min = max(0, y - 1)
-            y_max = min(analysis_binary.shape[0], y + 2)
-            has_pixel = np.any(analysis_binary[y_min:y_max, x] > 0)
-            presence_pattern.append(has_pixel)
+            # Convert to full image coordinates
+            img_x = x + self.plot_x
+            img_y = y + self.plot_y
 
-        # Analyze runs of presence/absence
-        runs = []
-        current_val = presence_pattern[0]
-        run_length = 1
+            # Use a 5-pixel vertical band centered on the curve
+            y_min = max(0, img_y - 2)
+            y_max = min(self.gray.shape[0], img_y + 3)
+            x_min = max(0, img_x)
+            x_max = min(self.gray.shape[1], img_x + 1)
 
-        for present in presence_pattern[1:]:
-            if present == current_val:
-                run_length += 1
+            # Get minimum intensity (darkest pixel) in the band
+            band = self.gray[y_min:y_max, x_min:x_max]
+            if band.size > 0:
+                min_intensities.append(np.min(band))
             else:
-                runs.append((current_val, run_length))
-                current_val = present
-                run_length = 1
-        runs.append((current_val, run_length))
+                min_intensities.append(255)
 
-        # Count segments (present runs) and gaps (absent runs)
-        segments = [length for present, length in runs if present]
-        gaps = [length for present, length in runs if not present]
+        min_intensities = np.array(min_intensities)
 
-        total_present = sum(segments)
-        total_absent = sum(gaps)
-        total = total_present + total_absent
-        presence_ratio = total_present / total if total > 0 else 1.0
+        # Classify each position as "dark" (has curve pixel) or "light" (gap)
+        # TRUE gaps are clearly white (intensity > 180)
+        # Curve pixels are dark (intensity < 100)
+        is_dark = min_intensities < 100
+        is_light = min_intensities > 180
 
+        dark_ratio = np.sum(is_dark) / len(is_dark) if len(is_dark) > 0 else 1.0
 
-        # Classification logic:
-        # Key insight: Both solid and dashed lines might show some gaps due to:
-        # - Noise in the binary mask
-        # - Interpolation errors when curves are close
-        #
-        # To distinguish:
-        # - Solid: higher presence (>0.90), fewer gaps, larger segments
-        # - Dashed: more gaps (>15), lower presence (<0.90), smaller avg segment
+        # Find TRUE gaps: runs of consecutive "light" positions
+        true_gaps = []
+        current_gap_length = 0
+
+        for i in range(len(is_light)):
+            if is_light[i]:
+                current_gap_length += 1
+            else:
+                if current_gap_length >= 3:  # Minimum gap width to count as true gap
+                    true_gaps.append(current_gap_length)
+                current_gap_length = 0
+
+        # Don't forget the last gap
+        if current_gap_length >= 3:
+            true_gaps.append(current_gap_length)
+
+        num_true_gaps = len(true_gaps)
+        avg_true_gap = np.mean(true_gaps) if true_gaps else 0
+
+        # Calculate gap regularity (true dashes have regular gaps)
+        gap_regularity = 0.0
+        if num_true_gaps >= 3:
+            gap_std = np.std(true_gaps)
+            gap_cv = gap_std / avg_true_gap if avg_true_gap > 0 else 999
+            if gap_cv < 0.5:
+                gap_regularity = 1.0  # Very regular
+            elif gap_cv < 1.0:
+                gap_regularity = 0.5  # Somewhat regular
+            # gap_cv >= 1.0 means irregular (likely noise, not true dashes)
+
+        # Also analyze segment lengths between gaps
+        segments = []
+        current_seg_length = 0
+        for i in range(len(is_dark)):
+            if is_dark[i]:
+                current_seg_length += 1
+            else:
+                if current_seg_length >= 3:
+                    segments.append(current_seg_length)
+                current_seg_length = 0
+        if current_seg_length >= 3:
+            segments.append(current_seg_length)
 
         avg_segment = np.mean(segments) if segments else 0
-        avg_gap = np.mean(gaps) if gaps else 0
-        num_gaps = len(gaps)
+        num_segments = len(segments)
 
-        # Compute gap regularity
-        gap_cv = 999
-        if num_gaps >= 3 and avg_gap > 0:
-            gap_std = np.std(gaps)
-            gap_cv = gap_std / avg_gap
-
-        # Scoring approach: higher score = more likely dashed
+        # Scoring: higher score = more likely DASHED
         dash_score = 0
 
-        # More gaps = more likely dashed
-        if num_gaps >= 15:
+        # TRUE gaps are the strongest indicator
+        if num_true_gaps >= 10:
+            dash_score += 4  # Many true gaps = definitely dashed
+        elif num_true_gaps >= 6:
+            dash_score += 3
+        elif num_true_gaps >= 3:
             dash_score += 2
-        elif num_gaps >= 10:
-            dash_score += 1
 
-        # Lower presence = more likely dashed
-        if presence_ratio < 0.88:
+        # Regular gaps increase confidence
+        if gap_regularity >= 0.5 and num_true_gaps >= 3:
             dash_score += 2
-        elif presence_ratio < 0.92:
+        elif gap_regularity > 0 and num_true_gaps >= 2:
             dash_score += 1
 
-        # Smaller segments relative to gaps = more likely dashed
-        segment_gap_ratio = 0
-        if avg_segment > 0 and avg_gap > 0:
-            segment_gap_ratio = avg_segment / avg_gap
-            if segment_gap_ratio < 8:  # Dashed lines have smaller ratio
-                dash_score += 1
-
-        # Regular gaps = more likely dashed (CV < 1.0)
-        if gap_cv < 1.0:
+        # Average gap size: dashes typically have gaps of 4-20 pixels
+        if num_true_gaps >= 2 and 4 <= avg_true_gap <= 20:
             dash_score += 1
 
-        # METHOD 2 bonus: Lower grayscale dark ratio indicates more gaps
-        if dark_ratio < 0.85:
-            dash_score += 2
-        elif dark_ratio < 0.92:
+        # Low dark ratio indicates gaps
+        if dark_ratio < 0.80:
             dash_score += 1
 
-        # METHOD 1 bonus: Lower tracking ratio indicates gaps detected during tracing
-        # BUT: be careful - our smoothing can create artificial gaps, so use stricter threshold
-        if tracking_ratio < 0.75:  # Only count if significantly low (was 0.90)
-            dash_score += 1
-
-        # Additional SOLID indicators (subtract from dash_score)
-        # High presence ratio strongly indicates solid
-        if presence_ratio > 0.91:
+        # SOLID indicators (reduce score)
+        # Very high dark ratio = continuous line
+        if dark_ratio > 0.95:
+            dash_score -= 2
+        elif dark_ratio > 0.90:
             dash_score -= 1
-        # High dark_ratio (most of curve has dark pixels) indicates solid
-        if dark_ratio > 0.88:
-            dash_score -= 1
-        # Long average segments indicate solid
-        if avg_segment > 30:
+
+        # Very few or no true gaps = solid
+        if num_true_gaps <= 1:
+            dash_score -= 2
+
+        # Very long average segments = solid
+        if avg_segment > 50 and num_true_gaps < 5:
             dash_score -= 1
 
         # Ensure score doesn't go negative
         dash_score = max(0, dash_score)
 
-        # Also check overlap with the dash_mask if available
-        dash_mask_overlap = 0.0
-        if hasattr(self, 'dash_mask') and self.dash_mask is not None:
-            dash_count = 0
-            total_count = 0
-            for x in x_positions:
-                y = int(curve.y_positions[x])
-                if 0 <= y < self.dash_mask.shape[0] and 0 <= x < self.dash_mask.shape[1]:
-                    total_count += 1
-                    if self.dash_mask[y, x] > 0:
-                        dash_count += 1
-            dash_mask_overlap = dash_count / total_count if total_count > 0 else 0
+        # Debug output
+        print(f"    Style analysis: true_gaps={num_true_gaps}, avg_gap={avg_true_gap:.1f}, "
+              f"dark_ratio={dark_ratio:.2f}, avg_seg={avg_segment:.1f}, regularity={gap_regularity:.2f}, score={dash_score}")
 
-            # Add bonus score based on dash mask overlap
-            if dash_mask_overlap > 0.3:
-                dash_score += 2
-            elif dash_mask_overlap > 0.15:
-                dash_score += 1
-
-        # Debug: print classification metrics
-        print(f"    Style analysis: gaps={num_gaps}, presence={presence_ratio:.2f}, "
-              f"dark_ratio={dark_ratio:.2f}, avg_seg={avg_segment:.1f}, dash_overlap={dash_mask_overlap:.2f}, score={dash_score}")
-
-        if dash_score >= 4:
-            return LineStyle.DASHED, 0.8
+        if dash_score >= 5:
+            return LineStyle.DASHED, 0.9
         elif dash_score >= 3:
-            return LineStyle.DASHED, 0.6
+            return LineStyle.DASHED, 0.7
         else:
-            return LineStyle.SOLID, 0.9
+            return LineStyle.SOLID, 0.85
 
     def _classify_from_presence_pattern(self, presences: List[bool]) -> Tuple[LineStyle, float]:
         """Classify line style from a presence/absence pattern."""
