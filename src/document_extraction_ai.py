@@ -69,7 +69,7 @@ class AIExtractionAssessor:
     def __init__(self, ollama_host: str = "http://localhost:11434", model: str = "llama3.2-vision"):
         self.ollama_host = ollama_host
         self.model = model
-        self.timeout = 90  # seconds - reduced due to image resizing
+        self.timeout = 60  # seconds - balanced timeout for vision model
 
     def is_available(self) -> bool:
         """Check if Ollama is available."""
@@ -358,6 +358,119 @@ ISSUE: [description if NO, or "none" if YES]"""
 
         return assessment
 
+    def count_curves_in_original(self, image_path: str) -> AIAssessment:
+        """Count the number of distinct curves in the original image."""
+
+        prompt = """How many step-function curves are in this Kaplan-Meier plot?
+Answer format:
+CURVES: 2
+COLORS: purple, cyan"""
+
+        response = self._call_vision_model(prompt, image_path)
+        return self._parse_curve_count(response)
+
+    def _parse_curve_count(self, response: str) -> AIAssessment:
+        """Parse curve count response."""
+        assessment = AIAssessment(
+            is_acceptable=True,
+            raw_response=response
+        )
+
+        import re
+
+        for line in response.strip().split('\n'):
+            line = line.strip()
+            if ':' not in line:
+                continue
+
+            parts = line.split(':', 1)
+            key = parts[0].strip().upper()
+            value = parts[1].strip()
+
+            if "CURVES" in key or "CURVE_COUNT" in key or "COUNT" in key:
+                nums = re.findall(r'\d+', value)
+                if nums:
+                    assessment.suggestions["curve_count"] = int(nums[0])
+            elif "COLOR" in key:
+                assessment.suggestions["curve_colors"] = value.lower()
+
+        # Fallback: look for numbers anywhere in response
+        if "curve_count" not in assessment.suggestions:
+            # Look for patterns like "2 curves", "two curves", etc.
+            nums = re.findall(r'(\d+)\s*(?:curve|line|survival)', response.lower())
+            if nums:
+                count = int(nums[0])
+                if 1 <= count <= 10:  # Reasonable curve count
+                    assessment.suggestions["curve_count"] = count
+            else:
+                # Try to find small numbers (1-10) which are likely curve counts
+                all_nums = re.findall(r'\b(\d)\b', response)  # Single digits only
+                for num in all_nums:
+                    count = int(num)
+                    if 1 <= count <= 10:
+                        assessment.suggestions["curve_count"] = count
+                        break
+
+        assessment.confidence = 0.8 if "curve_count" in assessment.suggestions else 0.3
+        return assessment
+
+    def assess_extraction_completeness(
+        self,
+        original_path: str,
+        extracted_path: str,
+        expected_curves: int = None
+    ) -> AIAssessment:
+        """Assess if all curves from original are present in extraction."""
+
+        prompt = f"""Count the distinct colored curves in this image.
+Expected: {expected_curves if expected_curves else 2} curves.
+If you see fewer curves than expected, identify missing colors.
+
+Reply ONLY:
+FOUND: [number of curves visible]
+COMPLETE: [YES if found >= expected, NO otherwise]
+MISSING: [color of missing curve, or "none"]"""
+
+        response = self._call_vision_model(prompt, extracted_path)
+        return self._parse_completeness(response)
+
+    def _parse_completeness(self, response: str) -> AIAssessment:
+        """Parse completeness assessment response."""
+        import re
+
+        assessment = AIAssessment(
+            is_acceptable=True,
+            raw_response=response
+        )
+
+        for line in response.strip().split('\n'):
+            line = line.strip()
+            if ':' not in line:
+                continue
+
+            parts = line.split(':', 1)
+            key = parts[0].strip().upper()
+            value = parts[1].strip()
+
+            if "FOUND" in key:
+                nums = re.findall(r'\d+', value)
+                if nums:
+                    assessment.suggestions["found_curves"] = int(nums[0])
+            elif "COMPLETE" in key:
+                if "NO" in value.upper():
+                    assessment.is_acceptable = False
+                    assessment.issues.append("Extraction incomplete")
+                    assessment.suggestions["needs_enhancement"] = True
+            elif "MISSING" in key:
+                if value.lower() not in ["none", "n/a", "no", ""]:
+                    assessment.is_acceptable = False
+                    assessment.issues.append(f"Missing: {value}")
+                    assessment.suggestions["missing_curves"] = value
+                    assessment.suggestions["needs_enhancement"] = True
+
+        assessment.confidence = 0.8
+        return assessment
+
 
 class AdaptiveExtractionDocumentor:
     """Creates extraction documentation with AI-assisted iterative refinement."""
@@ -368,6 +481,134 @@ class AdaptiveExtractionDocumentor:
         self.skip_plot_refinement = skip_plot_refinement
         self.assessor = AIExtractionAssessor() if use_ai else None
         self.params = ExtractionParameters()
+
+    def _enhance_image_for_extraction(
+        self,
+        img: np.ndarray,
+        enhancement_type: str = "auto"
+    ) -> List[Tuple[str, np.ndarray]]:
+        """Apply various color enhancements to improve curve extraction.
+
+        Returns a list of (name, enhanced_image) tuples to try.
+        """
+        enhancements = []
+
+        # 1. Color inversion (good for light curves on white background)
+        inverted = cv2.bitwise_not(img)
+        enhancements.append(("inverted", inverted))
+
+        # 2. Increase saturation (makes colors more distinct)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1].astype(np.int32) * 1.5, 0, 255).astype(np.uint8)
+        saturated = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        enhancements.append(("saturated", saturated))
+
+        # 3. Isolate each color channel
+        b, g, r = cv2.split(img)
+
+        # Blue channel (good for cyan/blue curves)
+        blue_enhanced = cv2.merge([b, b, b])
+        enhancements.append(("blue_channel", blue_enhanced))
+
+        # Red channel (good for red/magenta curves)
+        red_enhanced = cv2.merge([r, r, r])
+        enhancements.append(("red_channel", red_enhanced))
+
+        # Green channel
+        green_enhanced = cv2.merge([g, g, g])
+        enhancements.append(("green_channel", green_enhanced))
+
+        # 4. Contrast enhancement using CLAHE
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+        contrast_enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        enhancements.append(("contrast_enhanced", contrast_enhanced))
+
+        # 5. Color space conversion to emphasize differences
+        # Convert to LAB and enhance A channel (red-green) and B channel (blue-yellow)
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b_ch = cv2.split(lab)
+
+        # Enhance A channel (helps distinguish red/magenta from cyan)
+        a_enhanced = cv2.normalize(a, None, 0, 255, cv2.NORM_MINMAX)
+        enhancements.append(("lab_a_channel", cv2.merge([a_enhanced, a_enhanced, a_enhanced])))
+
+        # Enhance B channel (helps distinguish blue from yellow)
+        b_enhanced = cv2.normalize(b_ch, None, 0, 255, cv2.NORM_MINMAX)
+        enhancements.append(("lab_b_channel", cv2.merge([b_enhanced, b_enhanced, b_enhanced])))
+
+        return enhancements
+
+    def _count_curve_colors(self, img: np.ndarray) -> Dict[str, int]:
+        """Count pixels of different colors that could be curves."""
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        h, s, v = cv2.split(hsv)
+
+        # Only consider saturated, non-white pixels
+        mask = (s > 30) & (v > 50) & (v < 250)
+
+        color_counts = {
+            'cyan': np.sum(mask & (h >= 80) & (h <= 100)),
+            'blue': np.sum(mask & (h >= 100) & (h <= 130)),
+            'purple': np.sum(mask & (h >= 130) & (h <= 160)),
+            'magenta': np.sum(mask & (h >= 160) & (h <= 175)),
+            'red': np.sum(mask & ((h <= 10) | (h >= 175))),
+            'orange': np.sum(mask & (h >= 10) & (h <= 25)),
+            'green': np.sum(mask & (h >= 35) & (h <= 80)),
+        }
+
+        # Also count grayscale/black pixels
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        color_counts['black'] = np.sum((gray < 80) & (s < 50))
+        color_counts['gray'] = np.sum((gray >= 80) & (gray < 180) & (s < 50))
+
+        return color_counts
+
+    def _count_extracted_curves(self, img: np.ndarray, min_pixels: int = 500) -> int:
+        """Count the number of distinct curve colors in an extracted image.
+
+        Uses a higher threshold (500 pixels) to filter out noise and only
+        count colors that represent actual curves.
+        """
+        color_counts = self._count_curve_colors(img)
+        # Only count saturated colors (not gray/black which are often noise)
+        real_curves = 0
+        for color, count in color_counts.items():
+            if color not in ['gray', 'black'] and count >= min_pixels:
+                real_curves += 1
+            elif color in ['gray', 'black'] and count >= min_pixels * 5:
+                # Gray/black need much more pixels to be considered real curves
+                real_curves += 1
+        return real_curves
+
+    def _merge_extractions(
+        self,
+        original: np.ndarray,
+        enhanced: np.ndarray
+    ) -> np.ndarray:
+        """Merge curves from enhanced extraction with original extraction.
+
+        Takes the union of non-white pixels from both images.
+        """
+        # Create masks of non-white pixels
+        orig_gray = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
+        enh_gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+
+        orig_mask = orig_gray < 250
+        enh_mask = enh_gray < 250
+
+        # Start with the original image
+        result = original.copy()
+
+        # Add pixels from enhanced that aren't in original
+        new_pixels = enh_mask & ~orig_mask
+
+        # For new pixels, we need to assign a color
+        # Use the color from the enhanced image
+        result[new_pixels] = enhanced[new_pixels]
+
+        return result
 
     def create_documentation(
         self,
@@ -418,57 +659,107 @@ class AdaptiveExtractionDocumentor:
         if verbose:
             print(f"Step 2: Rectangle with axes/labels saved")
 
-        # Step 3: Plot area only (with AI-assisted boundary refinement)
+        # Step 3: Plot area only (simple cropping, no AI)
         step3_path = results_path / "step3_plot_area.png"
-
-        if self.use_ai and self.assessor and self.assessor.is_available() and not self.skip_plot_refinement:
-            # Use AI to refine the plot area boundaries
-            step3_img, refined_y_0, refined_x_0 = self._refine_plot_area(
-                img, x_0, x_max, y_0, y_100, step3_path, verbose
-            )
-            # Update calibration with refined values if they changed
-            if refined_y_0 != y_0 or refined_x_0 != x_0:
-                calibration['y_0_pixel_original'] = y_0
-                calibration['x_0_pixel_original'] = x_0
-                calibration['y_0_pixel'] = refined_y_0
-                calibration['x_0_pixel'] = refined_x_0
-                # Save updated calibration
-                with open(results_path / "calibration.json", 'w') as f:
-                    json.dump(calibration, f, indent=2)
-                if verbose:
-                    print(f"  Calibration updated: y_0={y_0}->{refined_y_0}, x_0={x_0}->{refined_x_0}")
-                # Update local variables for subsequent steps
-                y_0 = refined_y_0
-                x_0 = refined_x_0
-        else:
-            # Crop to plot area with margins to include complete curves
-            # Margins ensure curves at 100% and t=0 are fully visible
-            top_margin = 15
-            left_margin = 5
-            bottom_margin = 10
-            right_margin = 5
-            step3_img = img[max(0, y_100 - top_margin):min(h, y_0 + bottom_margin),
-                           max(0, x_0 - left_margin):min(w, x_max + right_margin)].copy()
-            cv2.imwrite(str(step3_path), step3_img)
+        top_margin = 15
+        left_margin = 5
+        bottom_margin = 10
+        right_margin = 5
+        step3_img = img[max(0, y_100 - top_margin):min(h, y_0 + bottom_margin),
+                       max(0, x_0 - left_margin):min(w, x_max + right_margin)].copy()
+        cv2.imwrite(str(step3_path), step3_img)
 
         if verbose:
             print(f"Step 3: Plot area saved")
 
-        # Step 4: Cleaned curves with AI refinement
+        # Step 4: Extract curves (no AI, fast extraction)
         step4_path = results_path / "step4_curves_only.png"
-
-        if self.use_ai and self.assessor and self.assessor.is_available():
-            step4_img = self._extract_with_refinement(
-                step3_img, step4_path, str(step3_path), verbose
-            )
-        else:
-            if verbose:
-                print("AI not available, using default parameters")
-            step4_img = self._extract_curves(step3_img, self.params)
-            cv2.imwrite(str(step4_path), step4_img)
+        step4_img = self._extract_curves(step3_img, self.params)
+        cv2.imwrite(str(step4_path), step4_img)
 
         if verbose:
             print(f"Step 4: Cleaned curves saved")
+
+        # AI Assessment: Check if all curves were captured
+        enhancement_applied = None
+        if self.use_ai and self.assessor and self.assessor.is_available():
+            if verbose:
+                print("  AI: Counting curves in original image...")
+
+            # Count expected curves
+            curve_count_assessment = self.assessor.count_curves_in_original(str(step1_path))
+            expected_curves = curve_count_assessment.suggestions.get("curve_count", 0)
+            expected_colors = curve_count_assessment.suggestions.get("curve_colors", "")
+
+            # Fallback: count colors in original image if AI failed
+            if expected_curves == 0:
+                original_colors = self._count_curve_colors(step3_img)
+                expected_curves = sum(1 for c in original_colors.values() if c > 200)
+                if verbose:
+                    print(f"  AI timed out, using color detection: {expected_curves} colors found")
+            else:
+                if verbose:
+                    print(f"  AI: Found {expected_curves} curves ({expected_colors})")
+
+            # Count extracted curves and compare with expected
+            extracted_curve_count = self._count_extracted_curves(step4_img)
+            if verbose:
+                print(f"  Extracted {extracted_curve_count} curve colors, expected {expected_curves}")
+
+            # Also try AI assessment (but don't rely on it alone)
+            if verbose:
+                print("  AI: Assessing extraction completeness...")
+
+            completeness = self.assessor.assess_extraction_completeness(
+                str(step1_path), str(step4_path), expected_curves
+            )
+
+            # Trigger enhancement if extracted < expected OR AI says incomplete
+            needs_enhancement = (extracted_curve_count < expected_curves) or \
+                               (not completeness.is_acceptable) or \
+                               completeness.suggestions.get("needs_enhancement", False)
+
+            if needs_enhancement:
+                if verbose:
+                    print(f"  AI: Issues detected: {completeness.issues}")
+                    print(f"  AI: Suggested enhancement: {completeness.suggestions.get('enhancement_type', 'auto')}")
+
+                # Try color enhancements
+                best_enhancement = None
+                best_curve_count = self._count_extracted_curves(step4_img)
+
+                enhancements = self._enhance_image_for_extraction(step3_img)
+                for enhance_name, enhanced_img in enhancements:
+                    # Extract curves from enhanced image
+                    enhanced_curves = self._extract_curves(enhanced_img, self.params)
+
+                    # Count curves in enhanced extraction
+                    curve_count = self._count_extracted_curves(enhanced_curves)
+
+                    if verbose:
+                        print(f"    Enhancement '{enhance_name}': {curve_count} color regions detected")
+
+                    if curve_count > best_curve_count:
+                        best_curve_count = curve_count
+                        best_enhancement = (enhance_name, enhanced_curves)
+
+                # If enhancement improved results, use it
+                if best_enhancement:
+                    enhance_name, enhanced_curves = best_enhancement
+                    if verbose:
+                        print(f"  AI: Using enhancement '{enhance_name}' (improved from {self._count_extracted_curves(step4_img)} to {best_curve_count} curves)")
+
+                    # Merge enhanced curves with original extraction
+                    step4_img = self._merge_extractions(step4_img, enhanced_curves)
+                    cv2.imwrite(str(step4_path), step4_img)
+                    enhancement_applied = enhance_name
+
+                    # Save the enhanced source for reference
+                    cv2.imwrite(str(results_path / f"step3_enhanced_{enhance_name}.png"),
+                               dict(enhancements)[enhance_name])
+            else:
+                if verbose:
+                    print("  AI: Extraction looks complete")
 
         # Step 5: Skeleton of the curves (thinned to 1-pixel width)
         step5_path = results_path / "step5_skeleton.png"
@@ -490,6 +781,8 @@ class AdaptiveExtractionDocumentor:
         )
         if verbose:
             print(f"Step 7: CSV files saved")
+            if enhancement_applied:
+                print(f"  Note: Enhancement '{enhancement_applied}' was applied to improve extraction")
 
         # Create summary visualization
         self._create_summary(img, calibration, results_path)
@@ -811,30 +1104,37 @@ class AdaptiveExtractionDocumentor:
 
         # === Extract curves ===
 
+        # Create saturation-protected text mask - don't mask high-saturation pixels (colored curves)
+        # Text is typically low saturation (grayscale), so we only apply text masking to low-sat pixels
+        saturation = hsv[:, :, 1]
+        high_saturation_mask = saturation > 40  # Pixels with saturation > 40 are protected
+        text_mask_for_colors = text_box_regions.copy()
+        text_mask_for_colors[high_saturation_mask] = 0  # Don't mask colored pixels
+
         # Green curve (H: 35-85)
         green_mask = cv2.inRange(hsv, np.array([35, 50, 50]), np.array([85, 255, 255]))
-        green_mask[text_box_regions > 0] = 0
+        green_mask[text_mask_for_colors > 0] = 0
 
         # Cyan/Teal curve (H: 85-105) - common in medical publications
         cyan_mask = cv2.inRange(hsv, np.array([85, 50, 50]), np.array([105, 255, 255]))
-        cyan_mask[text_box_regions > 0] = 0
+        cyan_mask[text_mask_for_colors > 0] = 0
 
         # Blue curve (H: 105-130)
         blue_mask = cv2.inRange(hsv, np.array([105, 50, 50]), np.array([130, 255, 255]))
-        blue_mask[text_box_regions > 0] = 0
+        blue_mask[text_mask_for_colors > 0] = 0
 
         # Purple/Magenta curve (H: 130-165)
         purple_mask = cv2.inRange(hsv, np.array([130, 50, 50]), np.array([165, 255, 255]))
-        purple_mask[text_box_regions > 0] = 0
+        purple_mask[text_mask_for_colors > 0] = 0
 
         # Red curve (H: 0-15 or 165-180)
         red_mask = cv2.inRange(hsv, np.array([0, 50, 50]), np.array([15, 255, 255]))
         red_mask |= cv2.inRange(hsv, np.array([165, 50, 50]), np.array([180, 255, 255]))
-        red_mask[text_box_regions > 0] = 0
+        red_mask[text_mask_for_colors > 0] = 0
 
         # Orange curve (H: 15-35)
         orange_mask = cv2.inRange(hsv, np.array([15, 50, 50]), np.array([35, 255, 255]))
-        orange_mask[text_box_regions > 0] = 0
+        orange_mask[text_mask_for_colors > 0] = 0
 
         # Gray curve - low saturation, medium value (not white, not black)
         # This catches gray/silver curves that are common in KM plots
@@ -907,14 +1207,15 @@ class AdaptiveExtractionDocumentor:
         gray_right = cv2.morphologyEx(gray_right, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
         gray_curve_mask[:, curve_protection_x:] = gray_right
 
-        # === Remove text-like components from colored masks ===
+        # === Remove text-like components from low-saturation masks ===
         # Text characters are typically small, roughly square blobs
         # Include curve_black to catch black text like "83" from "P = 0.0183"
+        # Note: Don't filter high-saturation colors (cyan, purple, etc.) - they can't be text
         # Define protected zone for curve starts (top-left corner)
         text_filter_start_zone_x = int(w * 0.15)  # Left 15% of image
         text_filter_start_zone_y = int(h * 0.15)  # Top 15% of image
 
-        for color_mask in [cyan_mask, gray_curve_mask, curve_black]:
+        for color_mask in [gray_curve_mask, curve_black]:
             # Find connected components
             num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(color_mask, connectivity=8)
             for i in range(1, num_labels):
@@ -1001,7 +1302,9 @@ class AdaptiveExtractionDocumentor:
         curve_start_zone_x = int(w * 0.15)  # Left 15% of image
         curve_start_zone_y = int(h * 0.15)  # Top 15% of image
 
-        for color_mask in [cyan_mask, gray_curve_mask, curve_black, orange_mask]:
+        # Note: Don't filter cyan/blue/purple/green/red - they require high saturation (S>50)
+        # so they can't be text. Only filter low-saturation colors (gray, black, orange).
+        for color_mask in [gray_curve_mask, curve_black, orange_mask]:
             num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(color_mask, connectivity=8)
             for i in range(1, num_labels):
                 area = stats[i, cv2.CC_STAT_AREA]
@@ -1258,13 +1561,19 @@ class AdaptiveExtractionDocumentor:
         # Convert to HSV for color detection
         hsv = cv2.cvtColor(curves_img, cv2.COLOR_BGR2HSV)
 
-        # Define color ranges for different curves
+        # Define color ranges for different curves (HSV color space)
         color_ranges = {
-            'cyan': {'h_min': 85, 'h_max': 105, 's_min': 50, 'v_min': 50},
-            'green': {'h_min': 35, 'h_max': 85, 's_min': 50, 'v_min': 50},
-            'blue': {'h_min': 105, 'h_max': 130, 's_min': 50, 'v_min': 50},
+            'cyan': {'h_min': 80, 'h_max': 100, 's_min': 40, 'v_min': 50},
+            'teal': {'h_min': 100, 'h_max': 110, 's_min': 40, 'v_min': 50},
+            'green': {'h_min': 35, 'h_max': 80, 's_min': 50, 'v_min': 50},
+            'blue': {'h_min': 110, 'h_max': 130, 's_min': 50, 'v_min': 50},
+            'purple': {'h_min': 130, 'h_max': 155, 's_min': 30, 'v_min': 50},
+            'magenta': {'h_min': 155, 'h_max': 175, 's_min': 30, 'v_min': 50},
             'red': {'h_min': 0, 'h_max': 10, 's_min': 50, 'v_min': 50},
-            'gray': {'h_min': 0, 'h_max': 180, 's_min': 0, 's_max': 50, 'v_min': 60, 'v_max': 180},
+            'red2': {'h_min': 175, 'h_max': 180, 's_min': 50, 'v_min': 50},  # Red wraps around
+            'orange': {'h_min': 10, 'h_max': 25, 's_min': 50, 'v_min': 50},
+            'yellow': {'h_min': 25, 'h_max': 35, 's_min': 50, 'v_min': 50},
+            'gray': {'h_min': 0, 'h_max': 180, 's_min': 0, 's_max': 50, 'v_min': 80, 'v_max': 180},
             'black': {'h_min': 0, 'h_max': 180, 's_min': 0, 's_max': 50, 'v_min': 0, 'v_max': 80},
         }
 
