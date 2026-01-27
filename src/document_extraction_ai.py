@@ -1383,41 +1383,169 @@ class AdaptiveExtractionDocumentor:
     def _create_skeleton(self, curves_img: np.ndarray) -> np.ndarray:
         """Create a skeleton (thinned) version of the extracted curves.
 
-        Uses morphological skeletonization to reduce curves to 1-pixel width,
-        which is useful for curve tracing and data extraction.
-
-        Also filters out censoring tick marks to show only the main curve line.
+        Processes each color separately to avoid merging different curves.
+        Uses morphological skeletonization to reduce curves to 1-pixel width.
+        Ensures continuous lines without gaps.
         """
         h, w = curves_img.shape[:2]
+        output = np.ones_like(curves_img) * 255
 
-        # Convert to grayscale for processing
+        # Convert to HSV for color separation
+        hsv = cv2.cvtColor(curves_img, cv2.COLOR_BGR2HSV)
+
+        # Define color ranges to process separately
+        color_ranges = [
+            ('cyan', [80, 40, 40], [110, 255, 255], [180, 180, 0]),      # BGR cyan
+            ('purple', [125, 30, 40], [165, 255, 255], [180, 0, 180]),   # BGR purple/magenta
+            ('blue', [100, 40, 40], [125, 255, 255], [180, 0, 0]),       # BGR blue
+            ('green', [35, 40, 40], [80, 255, 255], [0, 180, 0]),        # BGR green
+            ('red', [0, 40, 40], [10, 255, 255], [0, 0, 180]),           # BGR red
+            ('orange', [10, 40, 40], [25, 255, 255], [0, 128, 255]),     # BGR orange
+        ]
+
+        # Also handle grayscale curves (black, gray)
         gray = cv2.cvtColor(curves_img, cv2.COLOR_BGR2GRAY)
+        b, g, r = cv2.split(curves_img)
 
-        # Create binary mask of all curve pixels (non-white pixels)
-        binary = (gray < 250).astype(np.uint8) * 255
+        # Process black pixels
+        black_mask = ((gray < 80) & (hsv[:,:,1] < 50)).astype(np.uint8) * 255
+        if np.sum(black_mask) > 50:
+            skeleton = self._skeletonize_single_color(black_mask)
+            output[skeleton > 0] = [0, 0, 0]
 
-        # Step 1: Apply morphological opening to remove small protrusions (tick marks)
-        # Use a horizontal kernel to preserve horizontal lines (curve steps)
-        # and a vertical kernel to preserve vertical lines (curve drops)
-        kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))
-        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))
+        # Process gray pixels
+        gray_mask = ((gray >= 80) & (gray < 180) & (hsv[:,:,1] < 50)).astype(np.uint8) * 255
+        if np.sum(gray_mask) > 50:
+            skeleton = self._skeletonize_single_color(gray_mask)
+            output[skeleton > 0] = [128, 128, 128]
 
-        # Extract horizontal and vertical line segments
-        horizontal = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_h)
-        vertical = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_v)
+        # Process each color
+        for name, hsv_min, hsv_max, bgr_color in color_ranges:
+            mask = cv2.inRange(hsv, np.array(hsv_min), np.array(hsv_max))
 
-        # Combine: keep pixels that are part of horizontal OR vertical segments
-        cleaned = cv2.bitwise_or(horizontal, vertical)
+            if np.sum(mask) > 50:  # Only process if there are enough pixels
+                skeleton = self._skeletonize_single_color(mask)
+                output[skeleton > 0] = bgr_color
 
-        # Step 2: Dilate slightly to reconnect any gaps
-        kernel_small = np.ones((2, 2), np.uint8)
-        cleaned = cv2.dilate(cleaned, kernel_small, iterations=1)
+        return output
 
-        # Step 3: Apply skeletonization
-        skeleton = np.zeros_like(cleaned)
+    def _skeletonize_single_color(self, binary: np.ndarray) -> np.ndarray:
+        """Skeletonize a single color mask with smart gap filling for step curves."""
+        h, w = binary.shape
+
+        # Step 1: Light dilation to connect very close segments
+        kernel = np.ones((3, 3), np.uint8)
+        connected = cv2.dilate(binary, kernel, iterations=1)
+
+        # Step 2: Skeletonize first
+        skeleton = self._skeletonize(connected)
+
+        # Step 3: Smart gap filling that respects curve direction
+        # For Kaplan-Meier curves: horizontal segments (steps) and vertical segments (drops)
+        for _ in range(5):
+            skeleton = self._connect_step_curve_gaps(skeleton, max_gap=30)
+
+        # Step 4: Final cleanup - remove tiny isolated fragments
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(skeleton, connectivity=8)
+        for i in range(1, num_labels):
+            area = stats[i, cv2.CC_STAT_AREA]
+            if area < 5:
+                skeleton[labels == i] = 0
+
+        return skeleton
+
+    def _connect_step_curve_gaps(self, skeleton: np.ndarray, max_gap: int = 20) -> np.ndarray:
+        """Connect gaps in step-function curves (horizontal, vertical, and L-shaped)."""
+        result = skeleton.copy()
+        h, w = skeleton.shape
+
+        # Find endpoints
+        points = np.where(skeleton > 0)
+        if len(points[0]) == 0:
+            return result
+
+        endpoints = []
+        for y, x in zip(points[0], points[1]):
+            y1, y2 = max(0, y-1), min(h, y+2)
+            x1, x2 = max(0, x-1), min(w, x+2)
+            neighborhood = skeleton[y1:y2, x1:x2]
+            neighbor_count = np.sum(neighborhood > 0) - 1
+
+            if neighbor_count <= 1:
+                endpoints.append((y, x))
+
+        # Connect endpoints
+        connected = set()
+        for i, (y1, x1) in enumerate(endpoints):
+            if i in connected:
+                continue
+
+            best_match = None
+            best_dist = max_gap * 2 + 1  # Allow for L-shaped paths
+
+            for j, (y2, x2) in enumerate(endpoints):
+                if j <= i or j in connected:
+                    continue
+
+                dx = abs(x2 - x1)
+                dy = abs(y2 - y1)
+
+                # Horizontal connection: same row (within tolerance)
+                if dy <= 3 and dx <= max_gap and dx > 1:
+                    dist = dx
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_match = (j, y2, x2, 'horizontal')
+
+                # Vertical connection: same column (within tolerance)
+                elif dx <= 3 and dy <= max_gap and dy > 1:
+                    dist = dy
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_match = (j, y2, x2, 'vertical')
+
+                # L-shaped connection: for corners in step curves
+                elif dx <= max_gap and dy <= max_gap and dx + dy <= max_gap * 1.5:
+                    dist = dx + dy
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_match = (j, y2, x2, 'L-shaped')
+
+            if best_match:
+                j, y2, x2, direction = best_match
+                connected.add(i)
+                connected.add(j)
+
+                # Draw the connection
+                if direction == 'horizontal':
+                    y_avg = (y1 + y2) // 2
+                    for x in range(min(x1, x2), max(x1, x2) + 1):
+                        if 0 <= y_avg < h and 0 <= x < w:
+                            result[y_avg, x] = 255
+                elif direction == 'vertical':
+                    x_avg = (x1 + x2) // 2
+                    for y in range(min(y1, y2), max(y1, y2) + 1):
+                        if 0 <= y < h and 0 <= x_avg < w:
+                            result[y, x_avg] = 255
+                else:  # L-shaped
+                    # Draw horizontal then vertical (step-function style)
+                    # First horizontal from x1 to x2 at y1
+                    for x in range(min(x1, x2), max(x1, x2) + 1):
+                        if 0 <= y1 < h and 0 <= x < w:
+                            result[y1, x] = 255
+                    # Then vertical from y1 to y2 at x2
+                    for y in range(min(y1, y2), max(y1, y2) + 1):
+                        if 0 <= y < h and 0 <= x2 < w:
+                            result[y, x2] = 255
+
+        return result
+
+    def _skeletonize(self, binary: np.ndarray) -> np.ndarray:
+        """Apply morphological skeletonization to a binary image."""
+        skeleton = np.zeros_like(binary)
         element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
 
-        temp = cleaned.copy()
+        temp = binary.copy()
         while True:
             eroded = cv2.erode(temp, element)
             dilated = cv2.dilate(eroded, element)
@@ -1428,37 +1556,66 @@ class AdaptiveExtractionDocumentor:
             if cv2.countNonZero(temp) == 0:
                 break
 
-        # Step 4: Remove any remaining small isolated segments (tick mark remnants)
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(skeleton, connectivity=8)
-        for i in range(1, num_labels):
-            area = stats[i, cv2.CC_STAT_AREA]
-            # Remove very small isolated segments
-            if area < 10:
-                skeleton[labels == i] = 0
+        return skeleton
 
-        # Create output image with skeleton on white background
-        output = np.ones_like(curves_img) * 255
+    def _connect_skeleton_gaps(self, skeleton: np.ndarray, max_gap: int = 8) -> np.ndarray:
+        """Connect small gaps in skeleton by finding and bridging nearby endpoints."""
+        result = skeleton.copy()
+        h, w = skeleton.shape
 
-        # Color the skeleton based on original curve colors
-        skeleton_points = np.where(skeleton > 0)
-        for y, x in zip(skeleton_points[0], skeleton_points[1]):
-            # Check a small neighborhood in the original curves image for color
-            y1, y2 = max(0, y-2), min(curves_img.shape[0], y+3)
-            x1, x2 = max(0, x-2), min(curves_img.shape[1], x+3)
-            neighborhood = curves_img[y1:y2, x1:x2]
+        # Find all skeleton points
+        points = np.where(skeleton > 0)
+        if len(points[0]) == 0:
+            return result
 
-            # Find non-white pixels in neighborhood
-            non_white_mask = np.any(neighborhood < 250, axis=2)
-            if np.any(non_white_mask):
-                non_white_pixels = neighborhood[non_white_mask]
-                if len(non_white_pixels) > 0:
-                    output[y, x] = non_white_pixels[0]
-                else:
-                    output[y, x] = [0, 0, 0]
-            else:
-                output[y, x] = [0, 0, 0]
+        # For each point, count neighbors to find endpoints (1 neighbor)
+        endpoints = []
+        for y, x in zip(points[0], points[1]):
+            # Count 8-connected neighbors
+            y1, y2 = max(0, y-1), min(h, y+2)
+            x1, x2 = max(0, x-1), min(w, x+2)
+            neighborhood = skeleton[y1:y2, x1:x2]
+            neighbor_count = np.sum(neighborhood > 0) - 1  # Subtract self
 
-        return output
+            if neighbor_count <= 1:  # Endpoints have 0 or 1 neighbor
+                endpoints.append((y, x))
+
+        # Try to connect nearby endpoints
+        connected = set()
+        for i, (y1, x1) in enumerate(endpoints):
+            if i in connected:
+                continue
+
+            best_dist = max_gap + 1
+            best_j = -1
+            best_endpoint = None
+
+            for j, (y2, x2) in enumerate(endpoints[i+1:], i+1):
+                if j in connected:
+                    continue
+
+                # Calculate distance
+                dist = np.sqrt((y2 - y1)**2 + (x2 - x1)**2)
+
+                if dist <= max_gap and dist > 1 and dist < best_dist:
+                    best_dist = dist
+                    best_j = j
+                    best_endpoint = (y2, x2)
+
+            if best_endpoint:
+                y2, x2 = best_endpoint
+                connected.add(i)
+                connected.add(best_j)
+
+                # Draw a line between endpoints
+                steps = int(best_dist) + 1
+                for t in range(steps + 1):
+                    ty = int(y1 + (y2 - y1) * t / steps)
+                    tx = int(x1 + (x2 - x1) * t / steps)
+                    if 0 <= ty < h and 0 <= tx < w:
+                        result[ty, tx] = 255
+
+        return result
 
     def _create_overlay(
         self,
