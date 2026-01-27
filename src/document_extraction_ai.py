@@ -1821,6 +1821,9 @@ class AdaptiveExtractionDocumentor:
                     continue
                 if s <= max_s + 0.005:
                     s = min(s, max_s, 1.0)  # Cap at 1.0
+                    # Recalculate py from the capped survival value so visualization matches data
+                    # s = 1.0 - ((py - min_valid_y) / plot_height), solving for py:
+                    py = int(min_valid_y + (1.0 - s) * plot_height)
                     monotonic_points.append((t, s, px, py))
                     max_s = s
 
