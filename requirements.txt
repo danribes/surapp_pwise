@@ -20,9 +20,10 @@ pdfplumber>=0.10.0
 # openpyxl>=3.1.0
 
 # Optional: AI-assisted extraction (requires Ollama running)
-# Install with: pip install ollama httpx
+# Install with: pip install ollama httpx requests
 ollama>=0.2.0  # Ollama Python client for vision model integration
 httpx>=0.25.0  # HTTP client for Ollama API
+requests>=2.31.0  # HTTP client for API calls
 
 # Optional: scipy for curve interpolation/reconstruction
 scipy>=1.11.0
