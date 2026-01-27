@@ -1792,25 +1792,40 @@ class AdaptiveExtractionDocumentor:
             if len(points) < 10:
                 continue
 
-            # Enforce monotonicity
+            # Enforce monotonicity and filter out points above 100% survival
             monotonic_points = []
             max_s = 1.0
             for t, s, px, py in points:
+                # Skip points above 100% survival
+                if s > 1.0:
+                    continue
                 if s <= max_s + 0.005:
-                    s = min(s, max_s)
+                    s = min(s, max_s, 1.0)  # Cap at 1.0
                     monotonic_points.append((t, s, px, py))
                     max_s = s
 
             # Remove consecutive duplicates
-            cleaned_points = [monotonic_points[0]] if monotonic_points else []
-            for i in range(1, len(monotonic_points)):
-                t, s, px, py = monotonic_points[i]
-                prev_t, prev_s, _, _ = cleaned_points[-1]
-                if t - prev_t > 0.1 or prev_s - s > 0.005:
+            cleaned_points = []
+            for i, (t, s, px, py) in enumerate(monotonic_points):
+                if i == 0:
                     cleaned_points.append((t, s, px, py))
+                else:
+                    prev_t, prev_s, _, _ = cleaned_points[-1]
+                    if t - prev_t > 0.1 or prev_s - s > 0.005:
+                        cleaned_points.append((t, s, px, py))
 
-            if len(cleaned_points) < 5:
+            if len(cleaned_points) < 3:
                 continue
+
+            # Add starting point at (0, 1.0) - all survival curves start at 100%
+            # Calculate pixel position for (0, 1.0)
+            start_px = 0
+            start_py = 0  # y=0 corresponds to survival=1.0 (top of image)
+
+            # Prepend the starting point if the first point isn't already at t=0
+            first_t, first_s, first_px, first_py = cleaned_points[0]
+            if first_t > 0.05:  # If first point is not at time ~0
+                cleaned_points.insert(0, (0.0, 1.0, start_px, start_py))
 
             # Draw the cleaned points on the output image
             bgr_color = config['bgr']
@@ -1826,7 +1841,7 @@ class AdaptiveExtractionDocumentor:
 
                 prev_px, prev_py = px, py
 
-            # Create DataFrame for CSV
+            # Create DataFrame for CSV (exclude pixel coordinates)
             df = pd.DataFrame([(t, s) for t, s, _, _ in cleaned_points], columns=['Time', 'Survival'])
 
             # Save individual curve CSV
