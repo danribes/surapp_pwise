@@ -1768,9 +1768,18 @@ class AdaptiveExtractionDocumentor:
             pixel_points = []  # Store (x, y) pixel coordinates
             prev_y = None
 
+            # Define valid plot area boundaries
+            # The top margin contains title text, so exclude it
+            # y=15 corresponds to approximately where 100% survival line is
+            min_valid_y = 15  # Pixels above this are in the title/margin area
+            max_valid_y = h - 10  # Bottom margin
+
             for x in range(w):
                 col_mask = mask[:, x]
                 y_indices = np.where(col_mask)[0]
+
+                # Filter to only include pixels within the valid plot area
+                y_indices = y_indices[(y_indices >= min_valid_y) & (y_indices <= max_valid_y)]
 
                 if len(y_indices) > 0:
                     if len(y_indices) <= 3:
@@ -1782,8 +1791,11 @@ class AdaptiveExtractionDocumentor:
                         else:
                             y = y_min
 
+                    # Calculate time and survival
+                    # Survival: y=min_valid_y corresponds to 100%, y=max_valid_y corresponds to 0%
                     t = (x / w) * time_max
-                    s = 1.0 - (y / h)
+                    plot_height = max_valid_y - min_valid_y
+                    s = 1.0 - ((y - min_valid_y) / plot_height)
                     s = max(0, min(1, s))
 
                     points.append((t, s, x, y))
@@ -1820,7 +1832,7 @@ class AdaptiveExtractionDocumentor:
             # Add starting point at (0, 1.0) - all survival curves start at 100%
             # Calculate pixel position for (0, 1.0)
             start_px = 0
-            start_py = 0  # y=0 corresponds to survival=1.0 (top of image)
+            start_py = min_valid_y  # y=min_valid_y corresponds to survival=1.0 (100%)
 
             # Prepend the starting point if the first point isn't already at t=0
             first_t, first_s, first_px, first_py = cleaned_points[0]
