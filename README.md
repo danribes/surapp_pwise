@@ -384,69 +384,118 @@ For detailed AI setup, see [docs/surapp_ai.md](docs/surapp_ai.md).
 
 ---
 
-## Document Extraction Steps (with AI Refinement)
+## AI-Assisted Extraction with Step-by-Step Documentation
 
-Generate step-by-step documentation of the extraction process with optional AI-assisted refinement:
+Generate detailed step-by-step documentation of the extraction process, producing visualizations at each stage and CSV files with the extracted curve data.
+
+### Quick Start (Recommended)
 
 ```bash
-# With AI refinement (requires Ollama running)
-python src/document_extraction_ai.py -s input/your_image.png -r results/output_folder -v
+# Fast mode - recommended for most users
+python -m src.document_extraction_ai -s input/your_image.png -r results/output_folder --fast
 
-# Without AI (faster, uses default parameters)
-python src/document_extraction_ai.py -s input/your_image.png -r results/output_folder --no-ai -v
-
-# With existing calibration file
-python src/document_extraction_ai.py -s input/your_image.png -r results/output_folder -c results/calibration.json
+# With verbose output to see extraction details
+python -m src.document_extraction_ai -s input/your_image.png -r results/output_folder --fast -v
 ```
 
-### Options
+### Prerequisites
+
+1. **Calibration file**: The results folder must contain a `calibration.json` file with axis boundaries:
+   ```json
+   {
+     "x_0_pixel": 88,
+     "x_max_pixel": 421,
+     "y_0_pixel": 237,
+     "y_100_pixel": 2,
+     "time_max": 18.0
+   }
+   ```
+
+2. **Generate calibration** (if not available):
+   ```bash
+   python src/step2_calibrate_axes.py input/your_image.png --time-max 18
+   ```
+
+### Command-Line Options
 
 | Option | Description |
 |--------|-------------|
 | `-s, --source` | Source image path (required) |
 | `-r, --results` | Results output directory (required) |
 | `-c, --calibration` | Path to calibration JSON file (optional, auto-detects from results folder) |
-| `--no-ai` | Disable AI refinement (faster, uses default parameters) |
-| `-m, --max-iterations` | Maximum AI refinement iterations (default: 5) |
+| `--fast`, `-f` | Fast mode - skips AI, uses optimized defaults (recommended) |
+| `--no-ai` | Disable AI refinement |
+| `-m, --max-iterations` | Maximum AI refinement iterations (default: 2) |
 | `-v, --verbose` | Show detailed progress output |
 
 ### Output Files
 
-The script generates 4 step images:
+The extraction generates 8 steps plus CSV files:
+
+| Step | File | Description |
+|------|------|-------------|
+| 1 | `step1_original.png` | Original source image |
+| 2 | `step2_with_axes_labels.png` | Image with calibrated axis boundaries |
+| 3 | `step3_plot_area.png` | Cropped plot area (curves + grid lines) |
+| 4 | `step4_curves_only.png` | Extracted curves (raw detection) |
+| 5 | `step5_skeleton.png` | Skeleton curves (1-pixel width, gaps filled) |
+| 6 | `step6_final_points.png` | Final extracted points (clean, monotonic) |
+| 7 | `step7_overlay.png` | Original with extracted curves overlaid |
+| 8 | CSV files | Curve data files |
+
+**CSV Files:**
 
 | File | Description |
 |------|-------------|
-| `step1_original.png` | Original source image |
-| `step2_with_axes_labels.png` | Extracted rectangle with axes and labels |
-| `step3_plot_area.png` | Plot area only (curves + annotations) |
-| `step4_curves_only.png` | Cleaned curves without text/artifacts |
-| `calibration.json` | Calibration data (updated if AI refines boundaries) |
-| `extraction_regions.png` | Summary showing detected regions |
+| `curve_<color>.csv` | Individual curve data (e.g., `curve_cyan.csv`, `curve_purple.csv`) |
+| `all_curves.csv` | Combined data from all detected curves |
 
-### AI Refinement Process
+### CSV Format
 
-When AI is enabled, the script:
-1. **Step 3 refinement**: Adjusts plot area boundaries to exclude axis labels
-2. **Step 4 refinement**: Iteratively adjusts curve extraction parameters until:
-   - All curves are complete (no gaps)
-   - All text/annotations are removed
-   - No curve data is accidentally removed
+All curves start at (time=0, survival=100%) and maintain monotonic decreasing survival:
 
-### Running Ollama for AI
+```csv
+Time,Survival
+0.0,1.0
+0.81,0.928
+1.08,0.905
+...
+17.89,0.311
+```
+
+### Example Workflow
 
 ```bash
-# Start Ollama (if not already running)
+# 1. Place your KM plot image in the input folder
+cp my_km_plot.png input/
+
+# 2. Create calibration (adjust time-max to match your plot's x-axis)
+python src/step2_calibrate_axes.py input/my_km_plot.png --time-max 24
+
+# 3. Run the extraction
+python -m src.document_extraction_ai -s input/my_km_plot.png -r results/my_extraction --fast -v
+
+# 4. Check the results
+ls results/my_extraction/
+# Output: step1_original.png, step2_with_axes_labels.png, ..., curve_*.csv, all_curves.csv
+```
+
+### AI Refinement (Optional)
+
+For AI-assisted boundary refinement (requires Ollama with llama3.2-vision):
+
+```bash
+# Start Ollama
 ollama serve
 
 # Pull the vision model (first time only, ~4GB)
 ollama pull llama3.2-vision
 
-# Or use Docker
-docker run -d -p 11434:11434 -v ollama:/root/.ollama --name ollama ollama/ollama
-docker exec ollama ollama pull llama3.2-vision
+# Run with AI refinement
+python -m src.document_extraction_ai -s input/your_image.png -r results/output_folder -v
 ```
 
-**Note:** AI processing on CPU can be slow (1-3 minutes per assessment). For faster results, use `--no-ai` or run Ollama with GPU support.
+**Note:** AI processing on CPU can be slow. Use `--fast` mode for most cases.
 
 ---
 
