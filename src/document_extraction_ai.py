@@ -768,19 +768,25 @@ class AdaptiveExtractionDocumentor:
         if verbose:
             print(f"Step 5: Curve skeleton saved")
 
-        # Step 6: Original image with extracted curves overlay
-        step6_path = results_path / "step6_overlay.png"
-        step6_img = self._create_overlay(img, step4_img, x_0, x_max, y_0, y_100)
-        cv2.imwrite(str(step6_path), step6_img)
-        if verbose:
-            print(f"Step 6: Overlay visualization saved")
-
-        # Step 7: Extract curve coordinates to CSV
-        csv_paths = self._extract_curves_to_csv(
+        # Step 6: Final extracted points (only the points used in CSV, noise removed)
+        step6_path = results_path / "step6_final_points.png"
+        step6_img, csv_paths = self._create_final_points_image(
             step4_img, calibration, results_path, verbose
         )
+        cv2.imwrite(str(step6_path), step6_img)
         if verbose:
-            print(f"Step 7: CSV files saved")
+            print(f"Step 6: Final extracted points saved")
+
+        # Step 7: Original image with extracted curves overlay (using final points)
+        step7_path = results_path / "step7_overlay.png"
+        step7_img = self._create_overlay(img, step6_img, x_0, x_max, y_0, y_100)
+        cv2.imwrite(str(step7_path), step7_img)
+        if verbose:
+            print(f"Step 7: Overlay visualization saved")
+
+        # Step 8: CSV files already saved in step 6
+        if verbose:
+            print(f"Step 8: CSV files saved")
             if enhancement_applied:
                 print(f"  Note: Enhancement '{enhancement_applied}' was applied to improve extraction")
 
@@ -793,7 +799,8 @@ class AdaptiveExtractionDocumentor:
             'step3': str(step3_path),
             'step4': str(step4_path),
             'step5': str(step5_path),
-            'step6': str(step6_path)
+            'step6': str(step6_path),
+            'step7': str(step7_path)
         }
         result.update(csv_paths)
         return result
@@ -1698,6 +1705,156 @@ class AdaptiveExtractionDocumentor:
 
         return output
 
+    def _create_final_points_image(
+        self,
+        curves_img: np.ndarray,
+        calibration: dict,
+        results_path: Path,
+        verbose: bool
+    ) -> Tuple[np.ndarray, dict]:
+        """Create an image showing only the final extracted data points used in CSV.
+
+        This removes noise and shows only the monotonic, cleaned points that
+        represent the actual survival curve data.
+
+        Returns:
+            Tuple of (final_points_image, csv_paths_dict)
+        """
+        import pandas as pd
+
+        h, w = curves_img.shape[:2]
+        time_max = calibration.get('time_max', 24.0)
+
+        # Create output image (white background)
+        output = np.ones_like(curves_img) * 255
+
+        # Convert to HSV for color detection
+        hsv = cv2.cvtColor(curves_img, cv2.COLOR_BGR2HSV)
+
+        # Define color ranges and their display colors (BGR)
+        color_config = {
+            'cyan': {'h_min': 80, 'h_max': 100, 's_min': 40, 'v_min': 50, 'bgr': [180, 180, 0]},
+            'teal': {'h_min': 100, 'h_max': 110, 's_min': 40, 'v_min': 50, 'bgr': [128, 128, 0]},
+            'green': {'h_min': 35, 'h_max': 80, 's_min': 50, 'v_min': 50, 'bgr': [0, 180, 0]},
+            'blue': {'h_min': 110, 'h_max': 130, 's_min': 50, 'v_min': 50, 'bgr': [180, 0, 0]},
+            'purple': {'h_min': 130, 'h_max': 155, 's_min': 30, 'v_min': 50, 'bgr': [180, 0, 180]},
+            'magenta': {'h_min': 155, 'h_max': 175, 's_min': 30, 'v_min': 50, 'bgr': [180, 0, 180]},
+            'red': {'h_min': 0, 'h_max': 10, 's_min': 50, 'v_min': 50, 'bgr': [0, 0, 180]},
+            'red2': {'h_min': 175, 'h_max': 180, 's_min': 50, 'v_min': 50, 'bgr': [0, 0, 180]},
+            'orange': {'h_min': 10, 'h_max': 25, 's_min': 50, 'v_min': 50, 'bgr': [0, 128, 255]},
+            'yellow': {'h_min': 25, 'h_max': 35, 's_min': 50, 'v_min': 50, 'bgr': [0, 200, 200]},
+            'gray': {'h_min': 0, 'h_max': 180, 's_min': 0, 's_max': 50, 'v_min': 80, 'v_max': 180, 'bgr': [128, 128, 128]},
+            'black': {'h_min': 0, 'h_max': 180, 's_min': 0, 's_max': 50, 'v_min': 0, 'v_max': 80, 'bgr': [0, 0, 0]},
+        }
+
+        csv_paths = {}
+        all_curves_data = []
+
+        for color_name, config in color_config.items():
+            # Create mask for this color
+            h_channel, s_channel, v_channel = cv2.split(hsv)
+
+            mask = (h_channel >= config['h_min']) & (h_channel <= config['h_max'])
+            mask &= (s_channel >= config.get('s_min', 0))
+            mask &= (s_channel <= config.get('s_max', 255))
+            mask &= (v_channel >= config.get('v_min', 0))
+            mask &= (v_channel <= config.get('v_max', 255))
+
+            if np.sum(mask) < 100:
+                continue
+
+            # Extract curve points (same logic as CSV extraction)
+            points = []
+            pixel_points = []  # Store (x, y) pixel coordinates
+            prev_y = None
+
+            for x in range(w):
+                col_mask = mask[:, x]
+                y_indices = np.where(col_mask)[0]
+
+                if len(y_indices) > 0:
+                    if len(y_indices) <= 3:
+                        y = int(np.median(y_indices))
+                    else:
+                        y_min = int(np.min(y_indices))
+                        if prev_y is not None and abs(y_min - prev_y) > 20:
+                            y = int(np.median(y_indices))
+                        else:
+                            y = y_min
+
+                    t = (x / w) * time_max
+                    s = 1.0 - (y / h)
+                    s = max(0, min(1, s))
+
+                    points.append((t, s, x, y))
+                    prev_y = y
+
+            if len(points) < 10:
+                continue
+
+            # Enforce monotonicity
+            monotonic_points = []
+            max_s = 1.0
+            for t, s, px, py in points:
+                if s <= max_s + 0.005:
+                    s = min(s, max_s)
+                    monotonic_points.append((t, s, px, py))
+                    max_s = s
+
+            # Remove consecutive duplicates
+            cleaned_points = [monotonic_points[0]] if monotonic_points else []
+            for i in range(1, len(monotonic_points)):
+                t, s, px, py = monotonic_points[i]
+                prev_t, prev_s, _, _ = cleaned_points[-1]
+                if t - prev_t > 0.1 or prev_s - s > 0.005:
+                    cleaned_points.append((t, s, px, py))
+
+            if len(cleaned_points) < 5:
+                continue
+
+            # Draw the cleaned points on the output image
+            bgr_color = config['bgr']
+            prev_px, prev_py = None, None
+
+            for t, s, px, py in cleaned_points:
+                # Draw step-function lines between consecutive points
+                if prev_px is not None:
+                    # Horizontal line from prev to current x at prev y
+                    cv2.line(output, (prev_px, prev_py), (px, prev_py), bgr_color, 1)
+                    # Vertical line from prev y to current y at current x
+                    cv2.line(output, (px, prev_py), (px, py), bgr_color, 1)
+
+                prev_px, prev_py = px, py
+
+            # Create DataFrame for CSV
+            df = pd.DataFrame([(t, s) for t, s, _, _ in cleaned_points], columns=['Time', 'Survival'])
+
+            # Save individual curve CSV
+            csv_path = results_path / f"curve_{color_name}.csv"
+            df.to_csv(csv_path, index=False)
+            csv_paths[f'csv_{color_name}'] = str(csv_path)
+
+            if verbose:
+                print(f"  - {color_name}: {len(df)} points, "
+                      f"survival {df['Survival'].max():.1%} -> {df['Survival'].min():.1%}")
+
+            # Add to combined data
+            for _, row in df.iterrows():
+                all_curves_data.append({
+                    'Curve': color_name,
+                    'Time': row['Time'],
+                    'Survival': row['Survival']
+                })
+
+        # Save combined CSV
+        if all_curves_data:
+            combined_df = pd.DataFrame(all_curves_data)
+            combined_path = results_path / "all_curves.csv"
+            combined_df.to_csv(combined_path, index=False)
+            csv_paths['csv_all'] = str(combined_path)
+
+        return output, csv_paths
+
     def _extract_curves_to_csv(
         self,
         curves_img: np.ndarray,
@@ -1706,6 +1863,9 @@ class AdaptiveExtractionDocumentor:
         verbose: bool
     ) -> dict:
         """Extract curve coordinates from the cleaned curves image and save to CSV.
+
+        Note: This method is kept for backwards compatibility but the main extraction
+        is now done in _create_final_points_image which also generates the visualization.
 
         Returns:
             Dictionary with paths to generated CSV files
