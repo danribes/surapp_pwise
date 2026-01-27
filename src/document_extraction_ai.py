@@ -1769,12 +1769,17 @@ class AdaptiveExtractionDocumentor:
             prev_y = None
 
             # Define valid plot area boundaries
-            # The top margin contains title text, so exclude it
-            # y=15 corresponds to approximately where 100% survival line is
-            min_valid_y = 15  # Pixels above this are in the title/margin area
-            max_valid_y = h - 10  # Bottom margin
+            # The margins contain title text and axis labels, so exclude them
+            min_valid_x = 5   # Left margin - where time=0 starts
+            max_valid_x = w - 5  # Right margin
+            min_valid_y = 15  # Top margin - where 100% survival line is
+            max_valid_y = h - 10  # Bottom margin - where 0% survival line is
 
-            for x in range(w):
+            # Calculate plot dimensions for coordinate conversion
+            plot_width = max_valid_x - min_valid_x
+            plot_height = max_valid_y - min_valid_y
+
+            for x in range(min_valid_x, max_valid_x):
                 col_mask = mask[:, x]
                 y_indices = np.where(col_mask)[0]
 
@@ -1791,11 +1796,14 @@ class AdaptiveExtractionDocumentor:
                         else:
                             y = y_min
 
-                    # Calculate time and survival
+                    # Calculate time and survival based on valid plot area
+                    # Time: x=min_valid_x corresponds to 0, x=max_valid_x corresponds to time_max
+                    t = ((x - min_valid_x) / plot_width) * time_max
                     # Survival: y=min_valid_y corresponds to 100%, y=max_valid_y corresponds to 0%
-                    t = (x / w) * time_max
-                    plot_height = max_valid_y - min_valid_y
                     s = 1.0 - ((y - min_valid_y) / plot_height)
+
+                    # Clamp to valid range
+                    t = max(0, t)
                     s = max(0, min(1, s))
 
                     points.append((t, s, x, y))
@@ -1831,7 +1839,7 @@ class AdaptiveExtractionDocumentor:
 
             # Add starting point at (0, 1.0) - all survival curves start at 100%
             # Calculate pixel position for (0, 1.0)
-            start_px = 0
+            start_px = min_valid_x  # x=min_valid_x corresponds to time=0
             start_py = min_valid_y  # y=min_valid_y corresponds to survival=1.0 (100%)
 
             # Prepend the starting point if the first point isn't already at t=0
