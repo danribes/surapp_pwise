@@ -605,7 +605,11 @@ class HybridExtractor:
             mask = self.create_color_mask(img, extract_color) > 0
 
         # Find curve points
+        # Use a robust method that filters out tick marks (censoring marks)
+        # Tick marks are small vertical segments that extend above/below the curve
         points = []
+        prev_y = None
+
         for x in range(x_0, x_max + 1):
             col_mask = mask[:, x]
             y_indices = np.where(col_mask)[0]
@@ -614,9 +618,32 @@ class HybridExtractor:
             y_indices = y_indices[(y_indices >= y_100) & (y_indices <= y_0)]
 
             if len(y_indices) > 0:
-                # Use median y for this x
-                y = int(np.median(y_indices))
+                # For KM curves (survival decreasing), we want the HIGHEST y value
+                # (lowest on screen = highest survival) that forms a continuous curve.
+                # Tick marks extend both above and below the curve line.
+
+                if len(y_indices) <= 3:
+                    # Few pixels - likely just the curve line itself
+                    y = int(np.median(y_indices))
+                else:
+                    # Multiple pixels - might include tick mark
+                    # Use the value closest to the previous point (continuity)
+                    # For KM curves, prefer the lower y (higher survival) when in doubt
+                    y_min = int(np.min(y_indices))
+                    y_max = int(np.max(y_indices))
+                    y_med = int(np.median(y_indices))
+
+                    if prev_y is not None:
+                        # Choose value closest to previous, biased toward higher survival
+                        # (lower y value) since KM curves only decrease
+                        candidates = [y_min, y_med]
+                        y = min(candidates, key=lambda yc: abs(yc - prev_y) if yc >= prev_y - 5 else 1000)
+                    else:
+                        # First point - use minimum y (highest survival)
+                        y = y_min
+
                 points.append((x, y))
+                prev_y = y
 
         if len(points) < 10:
             self._log(f"    Warning: Only {len(points)} points found for {isolated.identification.color}")
@@ -649,17 +676,55 @@ class HybridExtractor:
         )
 
     def _enforce_monotonicity(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Ensure survival is monotonically decreasing."""
+        """Ensure survival is monotonically decreasing.
+
+        Also removes points that violate monotonicity (likely tick marks/censoring marks)
+        rather than just capping them, to produce cleaner step-function data.
+        """
         df = df.sort_values('Time').reset_index(drop=True)
 
-        max_survival = 1.0
-        survivals = []
-        for s in df['Survival']:
-            s = min(s, max_survival)
-            survivals.append(s)
-            max_survival = s
+        if len(df) < 2:
+            return df
 
-        df['Survival'] = survivals
+        # First pass: identify points that would violate monotonicity
+        # These are likely tick mark artifacts (points that go UP)
+        valid_indices = [0]  # Always keep first point
+        max_survival = df.iloc[0]['Survival']
+
+        for i in range(1, len(df)):
+            current_survival = df.iloc[i]['Survival']
+
+            # Only keep points that don't go up (within a small tolerance)
+            # Tolerance allows for small pixel-level noise
+            tolerance = 0.005  # 0.5% tolerance
+            if current_survival <= max_survival + tolerance:
+                # Cap any small upward noise
+                if current_survival > max_survival:
+                    df.at[i, 'Survival'] = max_survival
+                else:
+                    max_survival = current_survival
+                valid_indices.append(i)
+            # else: skip this point (it's a tick mark artifact going upward)
+
+        # Keep only valid points
+        df = df.iloc[valid_indices].reset_index(drop=True)
+
+        # Second pass: remove redundant consecutive points with same survival
+        # (keeps step function clean)
+        if len(df) > 2:
+            keep_indices = [0]
+            for i in range(1, len(df) - 1):
+                prev_surv = df.iloc[keep_indices[-1]]['Survival']
+                curr_surv = df.iloc[i]['Survival']
+                next_surv = df.iloc[i + 1]['Survival']
+
+                # Keep if survival changes (step point)
+                if abs(curr_surv - prev_surv) > 0.001 or abs(next_surv - curr_surv) > 0.001:
+                    keep_indices.append(i)
+
+            keep_indices.append(len(df) - 1)  # Always keep last point
+            df = df.iloc[keep_indices].reset_index(drop=True)
+
         return df
 
     def _resample_curve(self, df: pd.DataFrame, time_max: float, step: float = 0.5) -> pd.DataFrame:

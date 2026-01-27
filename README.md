@@ -294,6 +294,7 @@ surapp_pwise/
 │   ├── surapp.bat          # Unified entry point (Windows)
 │   ├── extract_km.py       # Main extraction script (all-in-one)
 │   ├── extract_km_ai.py    # AI-enhanced extraction script
+│   ├── document_extraction_ai.py  # Step-by-step documentation with AI
 │   ├── step1_preview_image.py  # Step 1: Preview image
 │   ├── step2_calibrate_axes.py # Step 2: Calibrate axes
 │   └── step3_extract_curves.py # Step 3: Extract curves
@@ -380,6 +381,72 @@ The AI compares the original image with extracted curves and:
 **Requirements:** Docker + ~4GB disk space for the model
 
 For detailed AI setup, see [docs/surapp_ai.md](docs/surapp_ai.md).
+
+---
+
+## Document Extraction Steps (with AI Refinement)
+
+Generate step-by-step documentation of the extraction process with optional AI-assisted refinement:
+
+```bash
+# With AI refinement (requires Ollama running)
+python src/document_extraction_ai.py -s input/your_image.png -r results/output_folder -v
+
+# Without AI (faster, uses default parameters)
+python src/document_extraction_ai.py -s input/your_image.png -r results/output_folder --no-ai -v
+
+# With existing calibration file
+python src/document_extraction_ai.py -s input/your_image.png -r results/output_folder -c results/calibration.json
+```
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `-s, --source` | Source image path (required) |
+| `-r, --results` | Results output directory (required) |
+| `-c, --calibration` | Path to calibration JSON file (optional, auto-detects from results folder) |
+| `--no-ai` | Disable AI refinement (faster, uses default parameters) |
+| `-m, --max-iterations` | Maximum AI refinement iterations (default: 5) |
+| `-v, --verbose` | Show detailed progress output |
+
+### Output Files
+
+The script generates 4 step images:
+
+| File | Description |
+|------|-------------|
+| `step1_original.png` | Original source image |
+| `step2_with_axes_labels.png` | Extracted rectangle with axes and labels |
+| `step3_plot_area.png` | Plot area only (curves + annotations) |
+| `step4_curves_only.png` | Cleaned curves without text/artifacts |
+| `calibration.json` | Calibration data (updated if AI refines boundaries) |
+| `extraction_regions.png` | Summary showing detected regions |
+
+### AI Refinement Process
+
+When AI is enabled, the script:
+1. **Step 3 refinement**: Adjusts plot area boundaries to exclude axis labels
+2. **Step 4 refinement**: Iteratively adjusts curve extraction parameters until:
+   - All curves are complete (no gaps)
+   - All text/annotations are removed
+   - No curve data is accidentally removed
+
+### Running Ollama for AI
+
+```bash
+# Start Ollama (if not already running)
+ollama serve
+
+# Pull the vision model (first time only, ~4GB)
+ollama pull llama3.2-vision
+
+# Or use Docker
+docker run -d -p 11434:11434 -v ollama:/root/.ollama --name ollama ollama/ollama
+docker exec ollama ollama pull llama3.2-vision
+```
+
+**Note:** AI processing on CPU can be slow (1-3 minutes per assessment). For faster results, use `--no-ai` or run Ollama with GPU support.
 
 ---
 

@@ -240,6 +240,9 @@ def _clean_data(points, tolerance=0.005):
 
     KM curves MUST start at survival=1.0 at time=0 (all subjects alive initially).
     If max detected survival is significantly below 1.0, rescale all values.
+
+    This function also removes points that violate monotonicity (likely from
+    censoring tick marks) rather than just capping them.
     """
     if not points:
         return []
@@ -247,7 +250,8 @@ def _clean_data(points, tolerance=0.005):
     # Sort by time
     sorted_pts = sorted(points, key=lambda p: p[0])
 
-    # Remove duplicate times
+    # Remove duplicate times - use the MINIMUM survival for each time
+    # (tick marks create higher values, so min gives the true curve)
     time_groups = {}
     for t, s in sorted_pts:
         t_rounded = round(t, 3)
@@ -258,8 +262,10 @@ def _clean_data(points, tolerance=0.005):
     deduplicated = []
     for t in sorted(time_groups.keys()):
         survivals = time_groups[t]
-        median_s = sorted(survivals)[len(survivals) // 2]
-        deduplicated.append((t, median_s))
+        # Use minimum survival instead of median to filter out tick marks
+        # Tick marks extend ABOVE the curve, so min gives the true curve value
+        min_s = min(survivals)
+        deduplicated.append((t, min_s))
 
     if not deduplicated:
         return []
@@ -279,15 +285,19 @@ def _clean_data(points, tolerance=0.005):
     elif first_s < 0.99:
         deduplicated[0] = (0.0, 1.0)
 
-    # Enforce monotonicity
+    # Enforce monotonicity by REMOVING violating points (not just capping)
+    # This filters out tick mark artifacts that temporarily go up
     monotonic = []
     max_s = 1.0
     for t, s in deduplicated:
-        s = min(s, max_s)
-        monotonic.append((t, s))
-        max_s = s
+        # Only keep points that don't go up (within tolerance)
+        if s <= max_s + tolerance:
+            s = min(s, max_s)  # Cap small noise
+            monotonic.append((t, s))
+            max_s = s
+        # else: skip this point (tick mark artifact)
 
-    # Remove consecutive near-duplicates
+    # Remove consecutive near-duplicates (keeps clean step function)
     cleaned = [monotonic[0]] if monotonic else []
     for i in range(1, len(monotonic)):
         t, s = monotonic[i]
